@@ -7,27 +7,50 @@ It provides both a batch runner (`Oc.py`) and an interactive REPL
 
 ---
 
+## Requirements
+
+- **Python 3.9** or later (no 3.10+ syntax used — compatible with older installs)
+- `netmiko >= 4.0`
+- `jinja2 >= 3.0`
+- `pyyaml >= 6.0` (only needed for inventory)
+- `readline` — standard library on Linux/macOS; install `pyreadline3` on Windows for history and tab-completion
+
+---
+
 ## File Structure
 
 ```
-raffita/
+raffita-gen/
 │
-├── colors.py                  # Single source of truth for all ANSI colors
-├── param_filling.py           # Unified parameter resolution (type, validate, prompt)
-├── history_manager.py         # Persistent REPL history with age/size pruning
-├── inventory.py               # YAML host/group inventory loader
-├── rollback.py                # Pre-state capture and per-host rollback stacks
+├── raffita_interpreter.py     # Interactive REPL  (main entry point)
+├── Oc.py                      # Batch .raffita file runner  (no REPL)
 │
-├── switch_backend.py          # SSH session management (netmiko wrapper)
-├── raffita_gen_lib.py         # Jinja2 helpers, file I/O, argparse schema utils
-├── raffita_objects.py         # Object registry (schemas, builders, delete/show cmds)
-├── raffita_interpreter.py     # Interactive REPL (main entry point)
+├── raffita/                   # Core package
+│   ├── __init__.py
+│   ├── colors.py              # Single source of truth for all ANSI colors
+│   ├── param_filling.py       # Parameter resolution — type coercion, validation, prompting
+│   ├── history.py             # Persistent REPL history with age/size pruning
+│   ├── inventory.py           # YAML host/group inventory loader
+│   ├── rollback.py            # Pre-state capture and per-host rollback stacks
+│   ├── backend.py             # SSH session management (netmiko wrapper)
+│   ├── gen_lib.py             # Jinja2 helpers, file I/O, argparse schema utils
+│   └── objects.py             # Object registry (schemas, builders, delete/show cmds)
 │
-├── Oc.py                      # Batch .raffita file runner (no REPL)
+├── templates/                 # Jinja2 config templates — one .j2 per object type
+│   ├── anycast_one_ip_template.j2
+│   ├── dvr_one_ip_template.j2
+│   └── ...
 │
-├── inventory.yaml             # Your host/group inventory (create this yourself)
+├── staging/                   # Generated .raffita files live here
+│   └── <hostname>.raffita
 │
-└── *.j2                       # Jinja2 config templates (one per object type)
+├── inventory/                 # Host/group inventory files
+│   └── example.yaml           # Annotated example — copy and adapt
+│
+├── logs/                      # Runtime logs (auto-created, git-ignored)
+│   └── raffita.log
+│
+└── requirements.txt
 ```
 
 ---
@@ -35,12 +58,14 @@ raffita/
 ## Installation
 
 ```bash
-pip install netmiko jinja2 pyyaml
+pip install -r requirements.txt
 ```
 
-`pyyaml` is only needed if you use the inventory feature.
-`readline` is part of the Python standard library on Linux/macOS.
-On Windows install `pyreadline3` for history and tab-completion.
+Or individually:
+
+```bash
+pip install netmiko jinja2 pyyaml
+```
 
 ---
 
@@ -48,10 +73,10 @@ On Windows install `pyreadline3` for history and tab-completion.
 
 ### Batch mode — Oc.py
 
-Create one `.raffita` file per switch, named `<hostname>.raffita`:
+Create one `.raffita` file per switch named `<hostname>.raffita` and drop it in `staging/`:
 
 ```
-# sw-core-01.raffita
+# staging/sw-core-01.raffita
 vlan create 100 name C010001000000_24
 interface vlan 100
   ip address 10.1.0.1 255.255.255.0
@@ -62,7 +87,7 @@ Then run:
 ```bash
 python Oc.py
 # or target specific files:
-python Oc.py sw-core-01.raffita sw-core-02.raffita
+python Oc.py staging/sw-core-01.raffita staging/sw-core-02.raffita
 ```
 
 Oc.py asks for credentials once, previews every file, and confirms
@@ -105,7 +130,8 @@ Push to sw-core-01? [y/N]: y
 
 ## Inventory File
 
-Create `inventory.yaml` to predefine hosts, groups, and per-host settings.
+Copy `inventory/example.yaml` and adapt it for your site.
+It supports per-host settings, groups, and group-of-groups:
 
 ```yaml
 defaults:
@@ -138,10 +164,16 @@ groups:
 Load in the REPL:
 
 ```
-raffita> inventory load inventory.yaml
+raffita> inventory load inventory/my-site.yaml
 raffita> inventory show          # summary
 raffita> inventory hosts         # list all hosts
 raffita> inventory groups        # list all groups with members
+```
+
+Or from the command line with Oc.py:
+
+```bash
+python Oc.py --inventory inventory/my-site.yaml
 ```
 
 ### Targeting groups
@@ -255,8 +287,8 @@ object names, flags, and inventory host/group names.
 | Command | Description |
 |---|---|
 | `create <obj> [--PARAM value ...]` | Build config and push live (or preview in dry-run) |
-| `stage  <obj> [--PARAM value ...]` | Build config and write to `<host>.raffita` |
-| `deploy [file.raffita ...]` | Push `.raffita` files (all in cwd, or named) |
+| `stage  <obj> [--PARAM value ...]` | Build config and write to `staging/<host>.raffita` |
+| `deploy [file.raffita ...]` | Push `.raffita` files (all in `staging/`, or named) |
 | `command --CMD "..." [--HOSTNAME h]` | Send arbitrary exec-mode commands |
 
 ### Session management
@@ -346,20 +378,23 @@ Validated fields include:
 
 ## Staging and Batch Deploy
 
-You can use `stage` to generate `.raffita` files in the REPL and then
-run Oc.py for the actual batch deployment — useful when you want to
-review or edit configs before sending:
+Use `stage` in the REPL to generate `.raffita` files, then run `Oc.py`
+for the actual batch deployment — useful when you want to review or edit
+configs before sending:
 
 ```
-# Generate
+# Generate — files land in staging/
 raffita> stage anycast --HOSTNAME sw-core-01 --VLAN_ID 100 ...
-# Config written to sw-core-01.raffita
+# ✎  Config written to staging/sw-core-01.raffita
 
-# Review / edit sw-core-01.raffita with any text editor, then:
-python Oc.py sw-core-01.raffita
+# Review / edit with any text editor, then batch-deploy:
+python Oc.py
 
-# Or deploy directly from the interpreter:
-raffita> deploy sw-core-01.raffita
+# Or target a specific file:
+python Oc.py staging/sw-core-01.raffita
+
+# Or deploy directly from inside the REPL:
+raffita> deploy staging/sw-core-01.raffita
 ```
 
 ---
@@ -386,13 +421,13 @@ router isis
 
 ## Extending — Adding a New Object Type
 
-1. Add a `SCHEMA_<NAME>` dict to `raffita_objects.py`.
+1. Add a `SCHEMA_<NAME>` dict to `raffita/objects.py`.
    Include `validate` and `validate_msg` for any field with a range.
 2. Write a `build_<name>(params)` function that calls `render_template()`.
 3. Write a `delete_<name>(params)` function returning VOSS `no ...` commands.
 4. Write a `show_<name>(opts)` function returning a list of show commands.
-5. Add the entry to `OBJECTS` dict at the bottom of `raffita_objects.py`.
-6. Create the matching Jinja2 template (`<name>_template.j2`).
+5. Add the entry to the `OBJECTS` dict at the bottom of `raffita/objects.py`.
+6. Create the matching Jinja2 template in `templates/<name>_template.j2`.
 
 No changes needed in the interpreter — it reads everything from `OBJECTS`.
 
@@ -400,12 +435,14 @@ No changes needed in the interpreter — it reads everything from `OBJECTS`.
 
 ## Logging
 
-All actions are logged to `raffita_interpreter.log` (configurable):
+All actions are logged to `logs/raffita.log` (auto-created on first run, git-ignored):
 - Every command sent to a switch
 - Full switch output (unfiltered)
 - Connect / disconnect / reconnect events
 - DRY-RUN entries (what *would* have been sent)
 - Errors and warnings
 
-The console output is filtered for readability; the log contains the
+Per-session Netmiko channel logs are written to `logs/<hostname>_session.log`.
+
+The console output is filtered for readability; the log files contain the
 raw unfiltered switch responses.
