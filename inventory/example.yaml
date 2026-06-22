@@ -1,0 +1,32 @@
+# Example inventory file — copy and rename to your own inventory.yaml
+#
+# Usage in raffita:
+#   raffita> inventory load inventory/my-site.yaml
+#   raffita> target @core
+#   raffita> create anycast --VLAN_ID 100 ...
+
+defaults:
+  save_command: "save config"
+  reconnect_attempts: 3
+  reconnect_delay: 5
+
+hosts:
+  sw-core-01:
+    description: "Core Switch 1, Building A"
+  sw-core-02:
+    description: "Core Switch 2, Building A"
+  sw-acc-21:
+    description: "Access Switch, Floor 2"
+  sw-acc-22:
+    description: "Access Switch, Floor 2"
+
+groups:
+  core:
+    - sw-core-01
+    - sw-core-02
+  access-floor2:
+    - sw-acc-21
+    - sw-acc-22
+  all-switches:
+    - "@core"
+    - "@access-floor2"
