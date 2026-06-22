@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
-# raffita_objects.py
+# Central registry of all network object types for the Raffita toolkit.
 #
-# Central registry of all network object types.
-#
-# Changes vs. original:
-#   - Colors imported from colors.py (not redefined here)
-#   - Every schema field that has a sensible range check now carries
-#     'validate' (callable) and 'validate_msg' (str) entries.
-#     resolve_params() in param_filling.py runs these before build() is called.
+# Each entry in OBJECTS provides: schema, build, delete, show.
+# Validation ranges are co-located with each schema field.
 
-from raffita_gen_lib import render_template, generate_vlan_name
+from .gen_lib import render_template, generate_vlan_name
 import ipaddress
 
-# ── IP/mask validator factories ──────────────────────────────────────────────
+
+# ── Validators ────────────────────────────────────────────────────────────────
 
 def _valid_ip(v):
     try:
@@ -23,35 +19,21 @@ def _valid_ip(v):
 
 def _valid_mask(v):
     try:
-        # Accept dotted-decimal masks as well as prefix lengths
         ipaddress.ip_network(f"0.0.0.0/{v}", strict=False)
         return True
     except ValueError:
         return False
 
-def _valid_vlan(v):
-    return 1 <= v <= 4094
+def _valid_vlan(v):   return 1 <= v <= 4094
+def _valid_isid(v):   return 256 <= v <= 16_777_214
+def _valid_vrf_id(v): return 1 <= v <= 511
+def _valid_vrrp_id(v):return 1 <= v <= 255
+def _valid_priority(v):return 1 <= v <= 254
+def _valid_mlt_id(v): return 1 <= v <= 512
+def _valid_loopback_id(v): return 1 <= v <= 256
 
-def _valid_isid(v):
-    # VOSS I-SID range: 256 – 16777214
-    return 256 <= v <= 16_777_214
 
-def _valid_vrf_id(v):
-    return 1 <= v <= 511
-
-def _valid_vrrp_id(v):
-    return 1 <= v <= 255
-
-def _valid_priority(v):
-    return 1 <= v <= 254
-
-def _valid_mlt_id(v):
-    return 1 <= v <= 512
-
-def _valid_loopback_id(v):
-    return 1 <= v <= 256
-
-# ── Schemas ──────────────────────────────────────────────────────────────────
+# ── Schemas ───────────────────────────────────────────────────────────────────
 
 SCHEMA_ANYCAST = {
     "VLAN_ID":            {"type": int,  "required": True,
@@ -71,7 +53,7 @@ SCHEMA_ANYCAST = {
                            "help": "I-SID (256-16777214)",
                            "validate": _valid_isid,
                            "validate_msg": "I_SID must be between 256 and 16777214."},
-    "HOSTNAME":           {"type": str,  "required": True,  "help": "Target switch (default = active target)"},
+    "HOSTNAME":           {"type": str,  "required": True,  "help": "Target switch"},
     "WAKE_ON_LAN":        {"type": bool, "required": False, "default": False, "help": "Wake-on-LAN / directed broadcast"},
     "DHCP_RELAY_ENABLED": {"type": bool, "required": False, "default": False, "help": "Enable DHCP relay"},
     "DHCP_RELAY_IP":      {"type": list, "required": False, "default": [],    "help": "DHCP relay IP (repeatable)"},
@@ -263,8 +245,8 @@ SCHEMA_CLUSTER = {
                        "validate": lambda v: _valid_ist_network(v),
                        "validate_msg": "IST_NETWORK must be a valid /30 network (e.g. 10.34.0.68/30).",
                        "help": "IST /30 network (e.g. 10.34.0.68/30)"},
-    "NODENAME1":      {"type": str,  "required": True,  "help": "First cluster member (target switch 1)"},
-    "NODENAME2":      {"type": str,  "required": True,  "help": "Second cluster member (target switch 2)"},
+    "NODENAME1":      {"type": str,  "required": True,  "help": "First cluster member"},
+    "NODENAME2":      {"type": str,  "required": True,  "help": "Second cluster member"},
     "DVR_LEAF":       {"type": bool, "required": False, "default": False, "help": "Enable DVR leaf"},
     "DVR_DOMAIN":     {"type": int,  "required": False, "default": None,  "help": "DVR domain (required if DVR_LEAF)"},
     "DVR_CLUSTER_ID": {"type": int,  "required": False, "default": None,  "help": "DVR cluster ID (required if DVR_LEAF)"},
@@ -278,7 +260,7 @@ def _valid_ist_network(v):
         return False
 
 
-# ── Builders ─────────────────────────────────────────────────────────────────
+# ── Builders ──────────────────────────────────────────────────────────────────
 
 def _relay_ips(p):
     return p["DHCP_RELAY_IP"] if p.get("DHCP_RELAY_ENABLED") else []
@@ -395,7 +377,8 @@ def build_vrf_multiarea(p):
         "L3_I_SID": p["L3_I_SID"],
     })
 
-# ── Cluster builder (two nodes) ──────────────────────────────────────────────
+
+# ── Cluster builder (two nodes) ───────────────────────────────────────────────
 
 def _second_nickname(nickname):
     parts = nickname.split(".")
@@ -451,7 +434,7 @@ def build_cluster(p):
     return [(p["NODENAME1"], cfg1), (p["NODENAME2"], cfg2)]
 
 
-# ── Delete commands ──────────────────────────────────────────────────────────
+# ── Delete commands ───────────────────────────────────────────────────────────
 
 _CONF_HDR = "enable\nconf t\nterm more disable\n"
 
@@ -493,7 +476,7 @@ def delete_vrf(p):
     return _CONF_HDR + f"no ip vrf {p['VRF_NAME']}\n"
 
 
-# ── Show commands ────────────────────────────────────────────────────────────
+# ── Show commands ─────────────────────────────────────────────────────────────
 
 def show_vlan_l3(opts):
     vid = opts.get("VLAN_ID")
@@ -535,18 +518,18 @@ def show_cluster(_opts):
     return ["show virtual-ist", "show smlt", "show isis spbm"]
 
 
-# ── Registry ─────────────────────────────────────────────────────────────────
+# ── Registry ──────────────────────────────────────────────────────────────────
 
 OBJECTS = {
     "anycast": {
         "desc": "Anycast-Gateway (one-ip) L3 VLAN interface",
         "schema": SCHEMA_ANYCAST, "build": build_anycast,
-        "delete": delete_vlan, "delete_params": ["VLAN_ID", "HOSTNAME"],
-        "show": show_vlan_l3,  "show_params":   ["VLAN_ID"],
+        "delete": delete_vlan,    "delete_params": ["VLAN_ID", "HOSTNAME"],
+        "show": show_vlan_l3,     "show_params":   ["VLAN_ID"],
     },
     "dvr": {
         "desc": "DVR one-IP gateway L3 VLAN interface",
-        "schema": SCHEMA_DVR, "build": build_dvr,
+        "schema": SCHEMA_DVR,  "build": build_dvr,
         "delete": delete_vlan, "delete_params": ["VLAN_ID", "HOSTNAME"],
         "show": show_vlan_l3,  "show_params":   ["VLAN_ID"],
     },
@@ -576,7 +559,7 @@ OBJECTS = {
         "show": show_mlt,     "show_params":   ["MLT_ID"],
     },
     "port": {
-        "desc": "Single interface (single port)",
+        "desc": "Single interface",
         "schema": SCHEMA_PORT, "build": build_port,
         "delete": delete_port, "delete_params": ["INTERFACE", "HOSTNAME"],
         "show": show_port,     "show_params":   ["INTERFACE"],
@@ -603,13 +586,13 @@ OBJECTS = {
     "vrf_multiarea": {
         "desc": "VRF multi-area redistribution",
         "schema": SCHEMA_VRF_MULTIAREA, "build": build_vrf_multiarea,
-        "delete": delete_vrf, "delete_params": ["VRF_NAME", "HOSTNAME"],
-        "show": show_vrf,     "show_params":   ["VRF_NAME"],
+        "delete": delete_vrf,           "delete_params": ["VRF_NAME", "HOSTNAME"],
+        "show": show_vrf,               "show_params":   ["VRF_NAME"],
     },
     "cluster": {
         "desc": "vIST cluster (generates config for two nodes)",
         "schema": SCHEMA_CLUSTER, "build": build_cluster, "multi_host": True,
-        "delete": None, "delete_params": [],
-        "show": show_cluster, "show_params": [],
+        "delete": None,           "delete_params": [],
+        "show": show_cluster,     "show_params":   [],
     },
 }
