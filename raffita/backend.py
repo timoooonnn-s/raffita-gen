@@ -8,8 +8,8 @@ import time
 from typing import Dict, List, Optional
 
 from .colors import (
-    C_CMD, C_OUTPUT, C_PREP, C_DIM, C_OK, C_WARN, C_ERROR,
-    BRIGHT_ORANGE, RESET,
+    C_CMD, C_OUTPUT, C_PREP, C_DIM, C_OK, C_WARN, C_ERROR, C_DRYRUN,
+    RESET,
 )
 
 _ROOT    = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
@@ -219,7 +219,7 @@ class SwitchSession:
             if out:
                 cleaned = self._filter_output(out)
                 if cleaned.strip():
-                    print(C_OUTPUT + self._indent(cleaned) + RESET)
+                    self._print_output(cleaned)
                 self.logger.info("[%s] SAVE OUT: %s", self.host, out.strip())
         except Exception as exc:
             self.logger.error("[%s] save failed: %s", self.host, exc)
@@ -281,12 +281,12 @@ class SwitchSession:
             if output:
                 cleaned = self._filter_output(output)
                 if cleaned.strip():
-                    print(C_OUTPUT + self._indent(cleaned) + RESET)
+                    self._print_output(cleaned)
                 self.logger.info("[%s] OUT: %s", self.host, output.strip())
             collected.append(output or "")
 
             if _YN_RE.search(output or ""):
-                print(BRIGHT_ORANGE + "  ⚡ (y/n) detected — answering YES" + RESET)
+                print(C_DRYRUN + "  ⚡ (y/n) detected — answering YES" + RESET)
                 self.logger.info("[%s] AUTO-ANSWER: y", self.host)
                 y_output = self.conn.send_command_timing("y", read_timeout=5)
                 if y_output:
@@ -322,9 +322,16 @@ class SwitchSession:
 
     # ── Output helpers ────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _indent(text: str) -> str:
-        return "\n".join("       " + line for line in text.splitlines())
+    def _print_output(self, text: str) -> None:
+        """Print switch output; lines starting with % are colored as errors."""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("%"):
+                print(C_ERROR + "       " + stripped + RESET)
+            else:
+                print(C_OUTPUT + "       " + stripped + RESET)
 
     @staticmethod
     def _filter_output(text: str) -> str:

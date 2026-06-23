@@ -54,7 +54,7 @@ class RaffitaInterpreter:
     def __init__(self, logfile: str = DEFAULT_LOGFILE):
         self.username:      Optional[str] = None
         self.password:      Optional[str] = None
-        self.active_target: Optional[str] = None
+        self.active_targets: List[str] = []
         self.dry_run:       bool          = True
         self.confirm:       bool          = True
         self.sessions:      Dict[str, SwitchSession] = {}
@@ -106,10 +106,17 @@ class RaffitaInterpreter:
 
     # ── Target resolution ─────────────────────────────────────────────────────
 
-    def _resolve_targets(self, ref: Optional[str]) -> List[str]:
-        if not ref:
-            return []
-        return self._inventory.resolve(ref) if ref.startswith("@") else [ref]
+    def _resolve_targets(self, refs: Optional[List[str]] = None) -> List[str]:
+        """Resolve active_targets (or given refs) to a flat, deduplicated host list."""
+        source = refs if refs is not None else self.active_targets
+        seen: set = set()
+        result: List[str] = []
+        for ref in source:
+            for host in (self._inventory.resolve(ref) if ref.startswith("@") else [ref]):
+                if host not in seen:
+                    seen.add(host)
+                    result.append(host)
+        return result
 
     # ── Option parsing ────────────────────────────────────────────────────────
 
@@ -136,13 +143,6 @@ class RaffitaInterpreter:
                     opts[current] = [opts[current], t]
         return obj, opts, None
 
-    def _inject_target(self, schema: dict, opts: Dict[str, Any]) -> None:
-        if "HOSTNAME" not in schema:
-            return
-        keys_upper = {k.upper() for k in opts}
-        if "HOSTNAME" not in keys_upper and self.active_target:
-            opts["HOSTNAME"] = self.active_target
-
     # ── Config building ───────────────────────────────────────────────────────
 
     def _build_configs(
@@ -152,13 +152,13 @@ class RaffitaInterpreter:
     ) -> Optional[List[Tuple[str, str, dict]]]:
         spec   = OBJECTS[obj_name]
         schema = spec["schema"]
-        self._inject_target(schema, opts)
 
-        raw_host = opts.get("HOSTNAME") or opts.get("hostname") or self.active_target
-        if raw_host and raw_host.startswith("@"):
-            hosts = self._resolve_targets(raw_host)
-        elif raw_host:
-            hosts = [raw_host]
+        # Explicit --HOSTNAME takes priority; otherwise use all active targets.
+        explicit = opts.get("HOSTNAME") or opts.get("hostname")
+        if explicit:
+            hosts = self._resolve_targets([str(explicit)]) if str(explicit).startswith("@") else [str(explicit)]
+        elif self.active_targets:
+            hosts = self._resolve_targets()
         else:
             print(C_ERROR + "  ✖  No target. Set --HOSTNAME or use 'target <host>'." + RESET)
             return None
@@ -169,9 +169,8 @@ class RaffitaInterpreter:
         results: List[Tuple[str, str, dict]] = []
 
         for host in hosts:
-            per_host_opts = dict(opts)
+            per_host_opts          = dict(opts)
             per_host_opts["HOSTNAME"] = host
-
             params, missing, errors = resolve_params(schema, per_host_opts)
             if errors or missing:
                 print(C_ERROR + f"  ✖  [{host}] parameter errors:" + RESET)
@@ -348,9 +347,13 @@ class RaffitaInterpreter:
         while i < len(tokens):
             tu = tokens[i].upper()
             if tu == "--CMD":
-                if i + 1 >= len(tokens):
-                    print(C_ERROR + "  ✖  --CMD requires a quoted value." + RESET); return
-                cmds.append(tokens[i + 1]); i += 2; continue
+                i += 1
+                parts: List[str] = []
+                while i < len(tokens) and not tokens[i].startswith("--"):
+                    parts.append(tokens[i]); i += 1
+                if not parts:
+                    print(C_ERROR + "  ✖  --CMD requires a value." + RESET); return
+                cmds.append(" ".join(parts)); continue
             if tu.startswith("--CMD="):
                 cmds.append(tokens[i].split("=", 1)[1]); i += 1; continue
             if tu == "--HOSTNAME":
@@ -365,9 +368,9 @@ class RaffitaInterpreter:
             print(C_ERROR + "  ✖  command requires at least one --CMD \"...\"." + RESET); return
 
         if host_from_opts and host:
-            targets = self._resolve_targets(host)
-        elif self.active_target:
-            targets = self._resolve_targets(self.active_target)
+            targets = self._resolve_targets([host])
+        elif self.active_targets:
+            targets = self._resolve_targets()
         elif self.sessions:
             targets = list(self.sessions)
         else:
@@ -381,31 +384,38 @@ class RaffitaInterpreter:
 
     def cmd_target(self, tokens: List[str]) -> None:
         if not tokens:
-            if self.active_target:
-                resolved = self._resolve_targets(self.active_target)
-                suffix   = C_DIM + f"  → {', '.join(resolved)}" + RESET if len(resolved) > 1 else ""
-                print(C_HOST + f"  Target: {self.active_target}" + RESET + suffix)
+            if self.active_targets:
+                resolved  = self._resolve_targets()
+                refs_str  = ", ".join(self.active_targets)
+                hosts_str = ", ".join(resolved)
+                print(C_HOST + f"  Target: {refs_str}" + RESET)
+                if hosts_str != refs_str:
+                    print(C_DIM + f"  → {hosts_str}" + RESET)
             else:
                 print(C_DIM + "  No target set." + RESET)
             return
-        val = tokens[0]
-        if val.lower() in ("none", "clear", "-"):
-            self.active_target = None
-            print(C_OK + "  ✔  target cleared" + RESET); return
-        self.active_target = val
-        if val.startswith("@"):
-            resolved = self._resolve_targets(val)
-            if resolved:
-                print(C_HOST + f"  ✔  group target {val}:" + RESET + C_DIM + f"  {', '.join(resolved)}" + RESET)
+        if len(tokens) == 1 and tokens[0].lower() in ("none", "clear", "-"):
+            self.active_targets = []
+            print(C_OK + "  ✔  target cleared" + RESET)
+            return
+        self.active_targets = list(tokens)
+        resolved  = self._resolve_targets()
+        refs_str  = ", ".join(self.active_targets)
+        hosts_str = ", ".join(resolved)
+        if hosts_str == refs_str:
+            print(C_HOST + f"  ✔  target: {refs_str}" + RESET)
         else:
-            print(C_HOST + f"  ✔  target set: {val}" + RESET)
+            print(C_HOST + f"  ✔  target: {refs_str}" + RESET + C_DIM + f"  → {hosts_str}" + RESET)
 
     def cmd_connect(self, tokens: List[str]) -> None:
-        host = tokens[0] if tokens else (
-            self.active_target
-            if self.active_target and not self.active_target.startswith("@")
-            else None
-        )
+        if tokens:
+            host: Optional[str] = tokens[0]
+        else:
+            resolved = self._resolve_targets()
+            host = resolved[0] if len(resolved) == 1 else None
+            if len(resolved) > 1:
+                print(C_ERROR + "  ✖  Multiple targets active. Specify: connect <host>" + RESET)
+                return
         if not host:
             print(C_ERROR + "  ✖  No host specified and no single-host target set." + RESET); return
         if not self._have_login():
@@ -425,8 +435,8 @@ class RaffitaInterpreter:
             targets = list(self.sessions)
         elif tokens:
             targets = [tokens[0]]
-        elif self.active_target and not self.active_target.startswith("@"):
-            targets = [self.active_target]
+        elif self.active_targets:
+            targets = self._resolve_targets()
         elif self.sessions:
             targets = list(self.sessions)
         else:
@@ -457,15 +467,16 @@ class RaffitaInterpreter:
             print(C_DIM + "  No open sessions." + RESET)
             return
         print()
+        active_set = set(self._resolve_targets())
         for host, sess in self.sessions.items():
             if sess.is_alive():
                 state = C_OK + "connected" + RESET
             else:
                 state = C_ERROR + "disconnected" + RESET
-            marker = CYAN_1 + " *" + RESET if host == self.active_target else ""
+            marker = CYAN_1 + " ◀" + RESET if host in active_set else ""
             depth  = self._rollback.depth(host)
             rb_tag = C_ROLLBACK + f"  [{depth} rollback{'s' if depth != 1 else ''}]" + RESET if depth else ""
-            print(f"  {CYAN_1}{host:<30}{RESET}  {state}{marker}{rb_tag}")
+            print(f"  {C_HOST}{host:<30}{RESET}  {state}{marker}{rb_tag}")
         print()
 
     # ── Rollback ──────────────────────────────────────────────────────────────
@@ -495,11 +506,8 @@ class RaffitaInterpreter:
             self._rollback.rollback_all(host, sess, confirm=self.confirm)
 
         elif sub == "list":
-            host = (
-                self.active_target
-                if self.active_target and not self.active_target.startswith("@")
-                else None
-            )
+            resolved = self._resolve_targets()
+            host     = resolved[0] if len(resolved) == 1 else None
             self._rollback.list_entries(host)
 
         elif sub == "prestate":
@@ -519,16 +527,14 @@ class RaffitaInterpreter:
             print(C_ERROR + f"  ✖  Unknown rollback sub-command '{sub}'." + RESET)
 
     def _single_target_or_error(self) -> Optional[str]:
-        if not self.active_target:
+        if not self.active_targets:
             print(C_ERROR + "  ✖  No target set. Use 'target <host>'." + RESET)
             return None
-        if self.active_target.startswith("@"):
-            hosts = self._resolve_targets(self.active_target)
-            if len(hosts) != 1:
-                print(C_ERROR + "  ✖  Rollback works on a single host. Set a specific target." + RESET)
-                return None
-            return hosts[0]
-        return self.active_target
+        hosts = self._resolve_targets()
+        if len(hosts) != 1:
+            print(C_ERROR + "  ✖  Rollback works on a single host. Set a specific target." + RESET)
+            return None
+        return hosts[0]
 
     # ── Inventory ─────────────────────────────────────────────────────────────
 
@@ -554,7 +560,7 @@ class RaffitaInterpreter:
                 for h in hosts:
                     entry = self._inventory.get_host(h)
                     desc  = C_DIM + f"  — {entry.description}" + RESET if entry and entry.description else ""
-                    print(f"  {CYAN_1}{h}{RESET}{desc}")
+                    print(f"  {C_HOST}{h}{RESET}{desc}")
                 print()
             else:
                 print(C_WARN + "  No hosts in inventory." + RESET)
@@ -582,13 +588,14 @@ class RaffitaInterpreter:
         print()
         print(C_INFO + "  Status" + RESET)
         print(GRAY_6 + "  " + "─" * 40 + RESET)
+        target_str = ", ".join(self.active_targets) if self.active_targets else "(not set)"
         print(f"  Login      {CYAN_1}{self.username or '(not set)'}{RESET}")
-        print(f"  Target     {CYAN_1}{self.active_target or '(not set)'}{RESET}")
+        print(f"  Target     {C_HOST}{target_str}{RESET}")
         print(f"  Mode       {mode_str}")
         print(f"  Confirm    {'on' if self.confirm else 'off'}")
         print(f"  Sessions   {len(self.sessions)}")
         if rb_total:
-            rb_str = ORANGE + str(rb_total) + " queued" + RESET
+            rb_str = C_ROLLBACK + str(rb_total) + " queued" + RESET
         else:
             rb_str = C_DIM + "none" + RESET
         print(f"  Rollbacks  {rb_str}")
@@ -753,13 +760,16 @@ class RaffitaInterpreter:
 
     def _repl_prompt(self) -> str:
         if not HAS_READLINE:
-            return f"raffita({self.active_target})> " if self.active_target else "raffita> "
+            if self.active_targets:
+                return f"raffita({','.join(self.active_targets)})> "
+            return "raffita> "
 
         w = lambda c: _RL_S + c + _RL_E
-        if self.active_target:
+        if self.active_targets:
+            label = ",".join(self.active_targets)
             return (
                 w(CYAN_1) + "raffita"
-                + w(GRAY_9) + f"({self.active_target})"
+                + w(GRAY_9) + f"({label})"
                 + w(CYAN_1) + "> "
                 + w(RESET)
             )
