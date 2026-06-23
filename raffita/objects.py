@@ -239,6 +239,43 @@ SCHEMA_VRF_MULTIAREA = {
                  "help": "L3 I-SID"},
 }
 
+SCHEMA_NTP = {
+    "HOSTNAME":   {"type": str, "required": True,  "help": "Target switch"},
+    "NTP_SERVER": {"type": str, "required": True,
+                   "validate": _valid_ip, "validate_msg": "NTP_SERVER must be a valid IP address.",
+                   "help": "NTP server IP address"},
+    "NTP_KEY_ID": {"type": int, "required": False, "default": None, "help": "MD5 authentication key ID"},
+    "NTP_KEY":    {"type": str, "required": False, "default": None, "help": "MD5 authentication key value"},
+}
+
+SCHEMA_SNMP = {
+    "HOSTNAME":       {"type": str, "required": True,  "help": "Target switch"},
+    "COMMUNITY_RO":   {"type": str, "required": False, "default": None, "help": "Read-only community string"},
+    "COMMUNITY_RW":   {"type": str, "required": False, "default": None, "help": "Read-write community string"},
+    "TRAP_HOST":      {"type": str, "required": False, "default": None,
+                       "validate": lambda v: _valid_ip(v),
+                       "validate_msg": "TRAP_HOST must be a valid IP address.",
+                       "help": "SNMP trap destination IP"},
+    "TRAP_COMMUNITY": {"type": str, "required": False, "default": None, "help": "Trap community string"},
+}
+
+SCHEMA_SPBM = {
+    "HOSTNAME":       {"type": str, "required": True,  "help": "Target switch"},
+    "NICKNAME":       {"type": str, "required": True,  "help": "SPBM nickname (e.g. 7.39.01)"},
+    "B_VID_1":        {"type": int, "required": True,
+                       "validate": _valid_vlan, "validate_msg": "B_VID_1 must be 1-4094.",
+                       "help": "Primary B-VID"},
+    "B_VID_2":        {"type": int, "required": True,
+                       "validate": _valid_vlan, "validate_msg": "B_VID_2 must be 1-4094.",
+                       "help": "Secondary B-VID"},
+    "SYSTEM_ID":      {"type": str, "required": True,  "help": "IS-IS system ID (MAC-format, e.g. 0011.2233.4455)"},
+    "MANUAL_AREA":    {"type": str, "required": False, "default": "49.0000.0000.0000.0000.00",
+                       "help": "IS-IS manual area"},
+    "HELLO_INTERVAL": {"type": int, "required": False, "default": 9,    "help": "IS-IS hello interval (seconds)"},
+    "HOLD_COUNT":     {"type": int, "required": False, "default": 3,    "help": "IS-IS hold count"},
+    "MTU":            {"type": int, "required": False, "default": 9600, "help": "SPBM MTU"},
+}
+
 SCHEMA_CLUSTER = {
     "NICKNAME":       {"type": str,  "required": True,  "help": "SPBM nickname (e.g. 7.39.30)"},
     "IST_NETWORK":    {"type": str,  "required": True,
@@ -375,6 +412,33 @@ def build_vrf_multiarea(p):
     return render_template("vrf_multiarea_config_template.j2", {
         "VRF_NAME": p["VRF_NAME"], "VRF_ID": p["VRF_ID"],
         "L3_I_SID": p["L3_I_SID"],
+    })
+
+def build_ntp(p):
+    return render_template("ntp_template.j2", {
+        "NTP_SERVER": p["NTP_SERVER"],
+        "NTP_KEY_ID": p["NTP_KEY_ID"],
+        "NTP_KEY":    p["NTP_KEY"],
+    })
+
+def build_snmp(p):
+    return render_template("snmp_template.j2", {
+        "COMMUNITY_RO":   p["COMMUNITY_RO"],
+        "COMMUNITY_RW":   p["COMMUNITY_RW"],
+        "TRAP_HOST":      p["TRAP_HOST"],
+        "TRAP_COMMUNITY": p["TRAP_COMMUNITY"],
+    })
+
+def build_spbm(p):
+    return render_template("spbm_template.j2", {
+        "NICKNAME":       p["NICKNAME"],
+        "B_VID_1":        p["B_VID_1"],
+        "B_VID_2":        p["B_VID_2"],
+        "SYSTEM_ID":      p["SYSTEM_ID"],
+        "MANUAL_AREA":    p["MANUAL_AREA"],
+        "HELLO_INTERVAL": p["HELLO_INTERVAL"],
+        "HOLD_COUNT":     p["HOLD_COUNT"],
+        "MTU":            p["MTU"],
     })
 
 
@@ -517,6 +581,15 @@ def show_vrf(opts):
 def show_cluster(_opts):
     return ["show virtual-ist", "show smlt", "show isis spbm"]
 
+def show_ntp(_opts):
+    return ["show ntp", "show ntp status"]
+
+def show_snmp(_opts):
+    return ["show snmp-server community", "show snmp-server host"]
+
+def show_spbm(_opts):
+    return ["show isis spbm", "show isis adjacency", "show isis lsdb"]
+
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -594,5 +667,23 @@ OBJECTS = {
         "schema": SCHEMA_CLUSTER, "build": build_cluster, "multi_host": True,
         "delete": None,           "delete_params": [],
         "show": show_cluster,     "show_params":   [],
+    },
+    "ntp": {
+        "desc": "NTP server configuration",
+        "schema": SCHEMA_NTP, "build": build_ntp,
+        "delete": None,       "delete_params": ["NTP_SERVER", "HOSTNAME"],
+        "show": show_ntp,     "show_params":   [],
+    },
+    "snmp": {
+        "desc": "SNMP community / trap configuration",
+        "schema": SCHEMA_SNMP, "build": build_snmp,
+        "delete": None,        "delete_params": ["HOSTNAME"],
+        "show": show_snmp,     "show_params":   [],
+    },
+    "spbm": {
+        "desc": "Basic IS-IS / SPBM node configuration",
+        "schema": SCHEMA_SPBM, "build": build_spbm,
+        "delete": None,        "delete_params": ["HOSTNAME"],
+        "show": show_spbm,     "show_params":   [],
     },
 }

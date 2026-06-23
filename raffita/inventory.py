@@ -18,7 +18,9 @@ except ImportError:
 # ── Data model ────────────────────────────────────────────────────────────────
 
 class HostEntry:
-    _KNOWN_KEYS = {"description", "save_command", "reconnect_attempts", "reconnect_delay"}
+    _KNOWN_KEYS = {
+        "description", "save_command", "reconnect_attempts", "reconnect_delay", "tags",
+    }
 
     def __init__(self, name: str, data: dict, defaults: dict):
         self.name               = name
@@ -32,6 +34,8 @@ class HostEntry:
         self.reconnect_delay    = int(data.get(
             "reconnect_delay", defaults.get("reconnect_delay", 5)
         ))
+        raw_tags = data.get("tags", []) or []
+        self.tags: List[str] = [str(t) for t in raw_tags]
         self.extra: Dict[str, Any] = {
             k: v for k, v in data.items() if k not in self._KNOWN_KEYS
         }
@@ -44,13 +48,18 @@ class HostEntry:
 
 class Inventory:
     """
-    Loads a YAML inventory file and resolves host/group references.
-    Group members may be @group references (nested, cycle-safe).
+    Loads a YAML inventory file and resolves host/group/tag references.
+
+    Targeting syntax:
+      hostname       — a single host by name
+      @groupname     — all members of a named group (recursive, cycle-safe)
+      @tag:tagname   — all hosts that carry the given tag
     """
 
     def __init__(self):
         self._hosts:    Dict[str, HostEntry] = {}
         self._groups:   Dict[str, List[str]] = {}
+        self._by_tag:   Dict[str, List[str]] = {}
         self._defaults: Dict[str, Any]       = {}
         self.loaded_from: Optional[Path]     = None
 
@@ -76,6 +85,13 @@ class Inventory:
             gname: list(members or [])
             for gname, members in raw_groups.items()
         }
+
+        # Build tag index
+        self._by_tag = {}
+        for name, entry in self._hosts.items():
+            for tag in entry.tags:
+                self._by_tag.setdefault(tag, []).append(name)
+
         self.loaded_from = p
         print(
             C_OK
@@ -85,9 +101,16 @@ class Inventory:
         )
 
     def resolve(self, ref: str, _seen: Optional[set] = None) -> List[str]:
-        """Resolve a host name or @group reference to a flat list of hostnames."""
+        """Resolve a host name, @group, or @tag:<name> to a flat list of hostnames."""
         if _seen is None:
             _seen = set()
+
+        if ref.startswith("@tag:"):
+            tag   = ref[5:]
+            hosts = self._by_tag.get(tag, [])
+            if not hosts:
+                print(C_WARN + f"  ⚠  no hosts with tag '{tag}'" + RESET)
+            return list(hosts)
 
         if not ref.startswith("@"):
             return [ref]
@@ -121,6 +144,9 @@ class Inventory:
     def list_groups(self) -> List[str]:
         return sorted(self._groups)
 
+    def list_tags(self) -> List[str]:
+        return sorted(self._by_tag)
+
     def print_summary(self) -> None:
         if not self.loaded_from:
             print(C_WARN + "  No inventory loaded. Use: inventory load <file>" + RESET)
@@ -132,8 +158,9 @@ class Inventory:
         if self._hosts:
             print(f"\n  Hosts ({len(self._hosts)}):")
             for name, entry in sorted(self._hosts.items()):
-                desc = C_DIM + f"  — {entry.description}" + RESET if entry.description else ""
-                print(f"    {CYAN_1}{name}{RESET}{desc}")
+                desc    = C_DIM + f"  — {entry.description}" + RESET if entry.description else ""
+                tag_str = C_DIM + f"  [{', '.join(entry.tags)}]" + RESET if entry.tags else ""
+                print(f"    {CYAN_1}{name}{RESET}{desc}{tag_str}")
         else:
             print(C_DIM + "  Hosts: (none)" + RESET)
 
@@ -143,6 +170,11 @@ class Inventory:
                 print(f"    {CYAN_1}@{gname}{RESET}  {C_DIM}{', '.join(members)}{RESET}")
         else:
             print(C_DIM + "  Groups: (none)" + RESET)
+
+        if self._by_tag:
+            print(f"\n  Tags ({len(self._by_tag)}):")
+            for tag, hosts in sorted(self._by_tag.items()):
+                print(f"    {CYAN_1}@tag:{tag}{RESET}  {C_DIM}{', '.join(hosts)}{RESET}")
 
         if self._defaults:
             print(C_DIM + f"\n  Defaults: {self._defaults}" + RESET)

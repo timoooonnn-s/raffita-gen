@@ -1,0 +1,22 @@
+{# Basic IS-IS / SPBM node configuration — fill in the correct VOSS CLI commands below  #}
+{# Variables: NICKNAME, B_VID_1, B_VID_2, SYSTEM_ID, MANUAL_AREA,                       #}
+{#            HELLO_INTERVAL, HOLD_COUNT, MTU                                             #}
+{#                                                                                         #}
+{# Example (replace with your platform's actual syntax):                                   #}
+{#   router isis                                                                            #}
+{#     sys-name {{ NICKNAME }}                                                              #}
+{#     system-id {{ SYSTEM_ID }}                                                            #}
+{#     manual-area {{ MANUAL_AREA }}                                                        #}
+{#     spbm 1                                                                               #}
+{#       b-vid {{ B_VID_1 }},{{ B_VID_2 }} primary {{ B_VID_1 }}                           #}
+{#       nick-name {{ NICKNAME }}                                                           #}
+{#       lsdb-trap enable                                                                   #}
+{#     exit                                                                                 #}
+{#     hello-interval {{ HELLO_INTERVAL }}                                                  #}
+{#     hold-count {{ HOLD_COUNT }}                                                          #}
+{#   exit                                                                                   #}
+{#   interface GigabitEthernet ...                                                          #}
+{#     isis                                                                                 #}
+{#       isis spbm 1                                                                        #}
+{#     exit                                                                                 #}
+{#   exit                                                                                   #}

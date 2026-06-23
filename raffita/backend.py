@@ -4,6 +4,7 @@
 import logging
 import os as _os
 import re
+import socket
 import time
 from typing import Dict, List, Optional
 
@@ -77,9 +78,22 @@ class SwitchSession:
 
     # ── Connection lifecycle ──────────────────────────────────────────────────
 
+    def preflight(self, port: int = 22, timeout: int = 3) -> bool:
+        """Return True if TCP port is reachable on the host."""
+        try:
+            with socket.create_connection((self.host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
     def connect(self) -> None:
         if self.conn is not None and self.is_alive():
             return
+
+        if not self.preflight():
+            raise RuntimeError(
+                f"TCP port 22 unreachable on {self.host} — check IP/firewall."
+            )
 
         try:
             from netmiko import ConnectHandler

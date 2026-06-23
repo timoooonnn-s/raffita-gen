@@ -1,0 +1,13 @@
+{# SNMP community / trap configuration — fill in the correct VOSS CLI commands below #}
+{# Variables available: COMMUNITY_RO, COMMUNITY_RW, TRAP_HOST, TRAP_COMMUNITY        #}
+{#                                                                                     #}
+{# Example (replace with your platform's actual syntax):                              #}
+{#   {% if COMMUNITY_RO %}                                                             #}
+{#   snmp-server community {{ COMMUNITY_RO }} ro                                      #}
+{#   {% endif %}                                                                       #}
+{#   {% if COMMUNITY_RW %}                                                             #}
+{#   snmp-server community {{ COMMUNITY_RW }} rw                                      #}
+{#   {% endif %}                                                                       #}
+{#   {% if TRAP_HOST %}                                                                #}
+{#   snmp-server host {{ TRAP_HOST }} {{ TRAP_COMMUNITY or COMMUNITY_RO }}            #}
+{#   {% endif %}                                                                       #}
