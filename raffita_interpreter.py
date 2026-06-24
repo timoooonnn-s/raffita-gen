@@ -297,6 +297,21 @@ class RaffitaInterpreter:
 
         session = self._get_session(host)
 
+        # Auto-connect if the session has never been opened (or dropped)
+        if not session.is_alive():
+            print(C_PREP + f"  ·  [{host}]  connecting …" + RESET)
+            try:
+                session.connect()
+            except Exception as exc:
+                print(C_ERROR + f"  ✖  Cannot connect to {host}: {exc}" + RESET)
+                self.logger.error("AUTO-CONNECT failed host=%s: %s", host, exc)
+                self._session_actions.append({
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "host": host, "action": action,
+                    "status": "error", "cmd_count": cmd_count,
+                })
+                return False
+
         # Pre-state capture for rollback
         pre_state: Dict[str, str] = {}
         if obj_name and params and obj_name in OBJECTS:
@@ -364,6 +379,8 @@ class RaffitaInterpreter:
         ok  = False
         try:
             ok = self._push(host, config, action, obj_name=obj_name, params=params, skip_confirm=True)
+        except Exception as exc:
+            print(C_ERROR + f"  ✖  [{host}] unexpected error: {exc}" + RESET)
         finally:
             cap.release_thread()
         return buf.getvalue(), ok
@@ -403,9 +420,13 @@ class RaffitaInterpreter:
                 ]
             # Print buffered output in submission order after all threads finish
             for fut in futs:
-                output, ok = fut.result()
-                print(output, end="", flush=True)
-                if not ok:
+                try:
+                    output, ok = fut.result()
+                    print(output, end="", flush=True)
+                    if not ok:
+                        all_ok = False
+                except Exception as exc:
+                    print(C_ERROR + f"  ✖  Worker thread failed: {exc}" + RESET)
                     all_ok = False
 
         return all_ok
@@ -511,8 +532,15 @@ class RaffitaInterpreter:
             print(C_ERROR + "  ✖  No connected sessions and no target set." + RESET); return
 
         config = "\n".join(cmds) + "\n"
-        for t in targets:
-            self._push(t, config, action="command")
+        if self.parallel and len(targets) > 1:
+            configs_list = [(t, config, {}) for t in targets]
+            self._push_parallel(configs_list, "command")
+        else:
+            for t in targets:
+                ok = self._push(t, config, action="command")
+                if not ok and self.halt_on_error:
+                    print(C_WARN + "  ⊘  halted on error  (halt off  to disable)" + RESET)
+                    break
 
     # ── Target / connect / sessions ───────────────────────────────────────────
 
@@ -542,24 +570,23 @@ class RaffitaInterpreter:
             print(C_HOST + f"  ✔  target: {refs_str}" + RESET + C_DIM + f"  → {hosts_str}" + RESET)
 
     def cmd_connect(self, tokens: List[str]) -> None:
-        if tokens:
-            host: Optional[str] = tokens[0]
-        else:
-            resolved = self._resolve_targets()
-            host = resolved[0] if len(resolved) == 1 else None
-            if len(resolved) > 1:
-                print(C_ERROR + "  ✖  Multiple targets active. Specify: connect <host>" + RESET)
-                return
-        if not host:
-            print(C_ERROR + "  ✖  No host specified and no single-host target set." + RESET); return
         if not self._have_login():
             print(C_ERROR + "  ✖  Run 'login' first." + RESET); return
-        sess = self._get_session(host)
-        try:
-            sess.connect()
-            print(C_OK + f"  ✔  connected to {host}" + RESET)
-        except Exception as exc:
-            print(C_ERROR + f"  ✖  Connection to {host} failed: {exc}" + RESET)
+        if tokens:
+            hosts = self._resolve_targets(tokens)
+        elif self.active_targets:
+            hosts = self._resolve_targets()
+        else:
+            print(C_ERROR + "  ✖  No host specified and no target set." + RESET); return
+        if not hosts:
+            print(C_WARN + "  ⚠  No hosts resolved." + RESET); return
+        for host in hosts:
+            sess = self._get_session(host)
+            try:
+                sess.connect()
+                print(C_OK + f"  ✔  connected to {host}" + RESET)
+            except Exception as exc:
+                print(C_ERROR + f"  ✖  Connection to {host} failed: {exc}" + RESET)
 
     def cmd_reconnect(self, tokens: List[str]) -> None:
         if not self._have_login():
@@ -568,7 +595,7 @@ class RaffitaInterpreter:
         if tokens and tokens[0].lower() == "--all":
             targets = list(self.sessions)
         elif tokens:
-            targets = [tokens[0]]
+            targets = self._resolve_targets(tokens)
         elif self.active_targets:
             targets = self._resolve_targets()
         elif self.sessions:
@@ -585,13 +612,16 @@ class RaffitaInterpreter:
 
     def cmd_disconnect(self, tokens: List[str]) -> None:
         if tokens:
-            host = tokens[0]
-            sess = self.sessions.pop(host, None)
-            if sess:
-                sess.disconnect()
-                print(C_OK + f"  ✔  disconnected from {host}" + RESET)
-            else:
-                print(C_WARN + f"  ⚠  No open session for {host}." + RESET)
+            hosts = self._resolve_targets(tokens)
+            if not hosts:
+                print(C_WARN + "  ⚠  No hosts resolved." + RESET); return
+            for host in hosts:
+                sess = self.sessions.pop(host, None)
+                if sess:
+                    sess.disconnect()
+                    print(C_OK + f"  ✔  disconnected from {host}" + RESET)
+                else:
+                    print(C_WARN + f"  ⚠  No open session for {host}." + RESET)
         else:
             self._close_all()
             print(C_OK + "  ✔  all sessions closed" + RESET)
@@ -807,10 +837,10 @@ class RaffitaInterpreter:
         cmd("command --CMD \"cmd\" [--HOSTNAME h]  exec-mode commands")
 
         section("Session")
-        cmd("target <host|@group>|none         set / clear the default target")
-        cmd("connect [host]                    open SSH connection")
-        cmd("disconnect [host]                 close connection(s)")
-        cmd("reconnect [host|--all]            reconnect dropped session(s)")
+        cmd("target <host|@group|@tag:X> ...   set / clear the default target(s)")
+        cmd("connect [host|@group|@tag:X] ...  open SSH connection(s)")
+        cmd("disconnect [host|@group] ...      close connection(s)")
+        cmd("reconnect [host|@group|--all]     reconnect dropped session(s)")
         cmd("targets / sessions                list open sessions + rollback depth")
 
         section("Rollback")
@@ -825,6 +855,7 @@ class RaffitaInterpreter:
 
         section("Settings")
         cmd("live on|off                       enable / disable live push")
+        cmd("dryrun on|off                     toggle dry-run (alias for live off/on)")
         cmd("confirm on|off                    ask before each push")
         cmd("parallel on|off                   push to all targets concurrently")
         cmd("halt on|off                       stop sequence on first error")
@@ -941,17 +972,32 @@ class RaffitaInterpreter:
     # ── REPL ──────────────────────────────────────────────────────────────────
 
     def _repl_prompt(self) -> str:
+        w = lambda c: _RL_S + c + _RL_E  # readline-safe ANSI wrapper
+
+        target_color = GRAY_9
+        if self.active_targets:
+            resolved = self._resolve_targets()
+            n_alive = sum(
+                1 for h in resolved
+                if h in self.sessions and self.sessions[h].is_alive()
+            )
+            if resolved and n_alive == len(resolved):
+                target_color = LIGHT_GREEN   # all connected
+            elif n_alive > 0:
+                target_color = ORANGE        # partially connected
+
         if not HAS_READLINE:
             if self.active_targets:
                 return f"raffita({','.join(self.active_targets)})> "
             return "raffita> "
 
-        w = lambda c: _RL_S + c + _RL_E
         if self.active_targets:
             label = ",".join(self.active_targets)
             return (
                 w(CYAN_1) + "raffita"
-                + w(GRAY_9) + f"({label})"
+                + w(GRAY_9) + "("
+                + w(target_color) + label
+                + w(GRAY_9) + ")"
                 + w(CYAN_1) + "> "
                 + w(RESET)
             )
