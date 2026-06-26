@@ -100,3 +100,10 @@ C_STAGE    = LIGHT_CYAN
 C_ROLLBACK = MAGENTA_1
 C_PREP     = GRAY_6
 C_DIM      = GRAY_7
+
+C_CONFIG   = YELLOW_GREEN_2  # config block preview lines
+C_CONFIRM  = PINK            # interactive confirm / input prompts
+C_BANNER   = CYAN_2          # startup ASCII art
+C_DIVIDER  = GRAY_6          # horizontal separator lines
+C_SECTION  = GRAY_9          # section headings and secondary labels
+C_PARAM    = CYAN_1          # parameter / key names in listings

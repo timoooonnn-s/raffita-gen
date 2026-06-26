@@ -22,11 +22,12 @@ except ImportError:
 
 from raffita.colors import (
     BOLD, RESET, WHITE,
-    RED, RED_3, ORANGE, BRIGHT_ORANGE, LIGHT_GREEN, PINK,
-    CYAN_1, LIGHT_CYAN, GRAY_6, GRAY_7, GRAY_9, GRAY_10,
-    YELLOW_GREEN_2, MAGENTA_1, C_ERROR, C_OK, C_WARN, C_INFO, C_HOST,
+    # Raw palette — used only in _PARALLEL_COLORS for visual variety
+    RED_3, LIGHT_GREEN, ORANGE, PINK, CYAN_1, LIGHT_CYAN, YELLOW_GREEN_2, MAGENTA_1,
+    # Semantic roles — use these everywhere else
+    C_ERROR, C_OK, C_WARN, C_INFO, C_HOST,
     C_CMD, C_OUTPUT, C_DIM, C_DRYRUN, C_STAGE, C_ROLLBACK, C_PREP,
-    RED_2,
+    C_CONFIG, C_CONFIRM, C_BANNER, C_DIVIDER, C_SECTION, C_PARAM,
 )
 from raffita.param_filling import resolve_params, print_param_errors
 from raffita.objects import OBJECTS
@@ -41,7 +42,7 @@ VERBS = [
     "create", "stage", "deploy", "show",
     "target", "connect", "disconnect", "reconnect", "targets", "sessions",
     "live", "dryrun", "confirm", "parallel", "halt", "status", "login",
-    "objects", "help", "exit", "quit", "command",
+    "objects", "help", "man", "exit", "quit", "command",
     "rollback", "inventory",
     "ping", "set", "unset", "watch", "clear", "env",
 ]
@@ -168,12 +169,12 @@ class RaffitaInterpreter:
 
     def login(self) -> None:
         print()
-        self.username = input(f"  {GRAY_9}Username:{RESET} ").strip()
-        self.password = getpass(f"  {GRAY_9}Password:{RESET} ")
+        self.username = input(f"  {C_SECTION}Username:{RESET} ").strip()
+        self.password = getpass(f"  {C_SECTION}Password:{RESET} ")
         if self.username:
             print(C_OK + f"  ✔  credentials set for '{self.username}'" + RESET)
             try:
-                ans = input(f"  {GRAY_9}Save to .env? [y/N]:{RESET} ").strip().lower()
+                ans = input(f"  {C_SECTION}Save to .env? [y/N]:{RESET} ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 ans = ""
@@ -372,11 +373,11 @@ class RaffitaInterpreter:
         print(C_HOST + f"  ▶  {host}" + RESET + "  " + BOLD + WHITE + action + RESET)
 
         if action != "command":
-            print(GRAY_6 + "  " + _DIV + RESET)
+            print(C_DIVIDER + "  " + _DIV + RESET)
             for line in config.splitlines():
                 if line.strip():
-                    print(YELLOW_GREEN_2 + "  " + line + RESET)
-            print(GRAY_6 + "  " + _DIV + RESET)
+                    print(C_CONFIG + "  " + line + RESET)
+            print(C_DIVIDER + "  " + _DIV + RESET)
 
         if self.dry_run:
             print(C_DRYRUN + "  ⊘  dry-run  —  nothing sent  ·  'live on' to push" + RESET)
@@ -394,7 +395,7 @@ class RaffitaInterpreter:
 
         if self.confirm and not skip_confirm:
             try:
-                ans = input(PINK + f"  Push to {host}? [y/N]: " + RESET).strip().lower()
+                ans = input(C_CONFIRM + f"  Push to {host}? [y/N]: " + RESET).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 print(C_WARN + "  ⊘  Aborted." + RESET)
@@ -503,7 +504,7 @@ class RaffitaInterpreter:
             hosts_str = ", ".join(h for h, _, _ in configs)
             try:
                 ans = input(
-                    PINK + f"  Push to {len(configs)} hosts ({hosts_str})? [y/N]: " + RESET
+                    C_CONFIRM + f"  Push to {len(configs)} hosts ({hosts_str})? [y/N]: " + RESET
                 ).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
@@ -674,7 +675,7 @@ class RaffitaInterpreter:
             if self.dry_run:
                 print(C_DRYRUN + "  ⊘  dry-run  —  commands that would be sent:" + RESET)
                 for cmd in show_cmds:
-                    print(YELLOW_GREEN_2 + "  " + cmd + RESET)
+                    print(C_CONFIG + "  " + cmd + RESET)
                 continue
 
             if not self._have_login():
@@ -878,7 +879,7 @@ class RaffitaInterpreter:
                 state = C_OK + "connected" + RESET
             else:
                 state = C_ERROR + "disconnected" + RESET
-            marker = CYAN_1 + " ◀" + RESET if host in active_set else ""
+            marker = C_PARAM + " ◀" + RESET if host in active_set else ""
             depth  = self._rollback.depth(host)
             rb_tag = C_ROLLBACK + f"  [{depth} rollback{'s' if depth != 1 else ''}]" + RESET if depth else ""
             print(f"  {C_HOST}{host:<30}{RESET}  {state}{marker}{rb_tag}")
@@ -920,7 +921,7 @@ class RaffitaInterpreter:
             for obj, params in sorted(self._param_defaults.items()):
                 print(C_HOST + f"  {obj}:" + RESET)
                 for k, v in sorted(params.items()):
-                    print(f"    {CYAN_1}--{k:<20}{RESET}  {GRAY_9}{v}{RESET}")
+                    print(f"    {C_PARAM}--{k:<20}{RESET}  {C_OUTPUT}{v}{RESET}")
             print()
             return
 
@@ -936,7 +937,7 @@ class RaffitaInterpreter:
                 print()
                 print(C_HOST + f"  {obj} defaults:" + RESET)
                 for k, v in sorted(defaults.items()):
-                    print(f"    {CYAN_1}--{k:<20}{RESET}  {GRAY_9}{v}{RESET}")
+                    print(f"    {C_PARAM}--{k:<20}{RESET}  {C_OUTPUT}{v}{RESET}")
                 print()
             return
 
@@ -1137,7 +1138,7 @@ class RaffitaInterpreter:
                 print()
                 for g in groups:
                     members = self._inventory.resolve(f"@{g}")
-                    print(f"  {CYAN_1}@{g}{RESET}  {C_DIM}{', '.join(members)}{RESET}")
+                    print(f"  {C_PARAM}@{g}{RESET}  {C_DIM}{', '.join(members)}{RESET}")
                 print()
             else:
                 print(C_WARN + "  No groups in inventory." + RESET)
@@ -1148,7 +1149,7 @@ class RaffitaInterpreter:
                 print()
                 for tag in tags:
                     hosts = self._inventory._by_tag[tag]
-                    print(f"  {CYAN_1}@tag:{tag}{RESET}  {C_DIM}{', '.join(hosts)}{RESET}")
+                    print(f"  {C_PARAM}@tag:{tag}{RESET}  {C_DIM}{', '.join(hosts)}{RESET}")
                 print()
             else:
                 print(C_WARN + "  No tags in inventory." + RESET)
@@ -1170,9 +1171,9 @@ class RaffitaInterpreter:
 
         print()
         print(C_INFO + "  Status" + RESET)
-        print(GRAY_6 + "  " + "─" * 40 + RESET)
+        print(C_DIVIDER + "  " + "─" * 40 + RESET)
         target_str = ", ".join(self.active_targets) if self.active_targets else "(not set)"
-        print(f"  Login      {CYAN_1}{self.username or '(not set)'}{RESET}")
+        print(f"  Login      {C_PARAM}{self.username or '(not set)'}{RESET}")
         print(f"  Target     {C_HOST}{target_str}{RESET}")
         print(f"  Mode       {mode_str}")
         print(f"  Confirm    {'on' if self.confirm else 'off'}")
@@ -1203,11 +1204,11 @@ class RaffitaInterpreter:
     def cmd_objects(self) -> None:
         print()
         print(C_INFO + "  Objects" + RESET)
-        print(GRAY_6 + "  " + "─" * 40 + RESET)
+        print(C_DIVIDER + "  " + "─" * 40 + RESET)
         for name in sorted(OBJECTS):
             spec = OBJECTS[name]
             note = C_DIM + "  (two nodes)" + RESET if spec.get("multi_host") else ""
-            print(f"  {CYAN_1}{name:<16}{RESET}  {GRAY_9}{spec.get('desc', '')}{RESET}{note}")
+            print(f"  {C_PARAM}{name:<16}{RESET}  {C_OUTPUT}{spec.get('desc', '')}{RESET}{note}")
         print()
 
     def cmd_help(self, tokens: List[str]) -> None:
@@ -1215,16 +1216,31 @@ class RaffitaInterpreter:
             self._help_general()
         elif tokens[0].lower() in OBJECTS:
             self._help_object(tokens[0].lower())
-        elif tokens[0].lower() in _VERB_HELP:
-            self._help_verb(tokens[0].lower())
         else:
             self._help_general()
+
+    def cmd_man(self, tokens: List[str]) -> None:
+        if not tokens:
+            print()
+            print(C_INFO + "  Manpages" + RESET)
+            print(C_DIVIDER + "  " + "─" * 40 + RESET)
+            for v in sorted(_VERB_HELP):
+                print(f"  {C_PARAM}{v}{RESET}")
+            print()
+            print(C_DIM + "  Usage: man <verb>" + RESET)
+            print()
+            return
+        verb = tokens[0].lower()
+        if verb not in _VERB_HELP:
+            print(C_ERROR + f"  ✖  No manpage for '{verb}'.  Try 'man' to list all." + RESET)
+            return
+        self._help_verb(verb)
 
     def _help_object(self, obj: str) -> None:
         spec = OBJECTS[obj]
         print()
         print(C_INFO + f"  {obj}" + RESET + C_DIM + f"  —  {spec.get('desc', '')}" + RESET)
-        print(GRAY_6 + "  " + "─" * 40 + RESET)
+        print(C_DIVIDER + "  " + "─" * 40 + RESET)
         for name, cfg in spec["schema"].items():
             req     = C_ERROR + "required" + RESET if cfg.get("required") else C_DIM + "optional" + RESET
             t       = cfg.get("type", str)
@@ -1232,7 +1248,7 @@ class RaffitaInterpreter:
             default = cfg.get("default")
             extra   = "" if default is None else C_DIM + f"  default={default}" + RESET
             valmsg  = C_DIM + f"  [{cfg['validate_msg']}]" + RESET if cfg.get("validate_msg") else ""
-            print(f"  {CYAN_1}--{name:<20}{RESET}  {GRAY_9}{tname:<5}{RESET}  {req}{extra}{valmsg}")
+            print(f"  {C_PARAM}--{name:<20}{RESET}  {C_OUTPUT}{tname:<5}{RESET}  {req}{extra}{valmsg}")
             if cfg.get("help"):
                 print(f"        {C_DIM}{cfg['help']}{RESET}")
         print()
@@ -1240,8 +1256,8 @@ class RaffitaInterpreter:
     def _help_verb(self, verb: str) -> None:
         print()
         print(C_INFO + f"  {verb}" + RESET)
-        print(GRAY_6 + "  " + "─" * 52 + RESET)
-        print(C_DIM + f"  Usage:  " + RESET + CYAN_1 + _VERB_HELP[verb] + RESET)
+        print(C_DIVIDER + "  " + "─" * 52 + RESET)
+        print(C_DIM + f"  Usage:  " + RESET + C_PARAM + _VERB_HELP[verb] + RESET)
 
         _VERB_NOTES: Dict[str, List[str]] = {
             "show": [
@@ -1329,11 +1345,11 @@ class RaffitaInterpreter:
 
         if verb in OBJ_VERBS:
             print()
-            print(GRAY_9 + "  Available objects:" + RESET)
+            print(C_SECTION + "  Available objects:" + RESET)
             for name in sorted(OBJECTS):
                 spec = OBJECTS[name]
                 note = C_DIM + "  (two nodes)" + RESET if spec.get("multi_host") else ""
-                print(f"  {CYAN_1}{name:<16}{RESET}  {GRAY_9}{spec.get('desc', '')}{RESET}{note}")
+                print(f"  {C_PARAM}{name:<16}{RESET}  {C_OUTPUT}{spec.get('desc', '')}{RESET}{note}")
             print()
             print(C_DIM + "  Use 'help <obj>' to see parameters for a specific object." + RESET)
 
@@ -1342,18 +1358,18 @@ class RaffitaInterpreter:
     def _help_general(self) -> None:
         print()
         print(C_INFO + "  Commands" + RESET)
-        print(GRAY_6 + "  " + "─" * 52 + RESET)
+        print(C_DIVIDER + "  " + "─" * 52 + RESET)
 
         def section(title: str) -> None:
             print()
-            print(GRAY_9 + f"  {title}" + RESET)
+            print(C_SECTION + f"  {title}" + RESET)
 
         def cmd(line: str) -> None:
             parts = line.split("  ", 1)
             if len(parts) == 2:
-                print(f"  {CYAN_1}{parts[0]:<32}{RESET}  {GRAY_9}{parts[1]}{RESET}")
+                print(f"  {C_PARAM}{parts[0]:<32}{RESET}  {C_OUTPUT}{parts[1]}{RESET}")
             else:
-                print(f"  {CYAN_1}{line}{RESET}")
+                print(f"  {C_PARAM}{line}{RESET}")
 
         section("Config")
         cmd("create [--live|--dry] <obj> [--PARAM v]  build and push config")
@@ -1400,6 +1416,7 @@ class RaffitaInterpreter:
         cmd("clear                             clear the terminal")
         cmd("status                            show current settings")
         cmd("objects                           list all object types")
+        cmd("man <verb>                        manpage for a command")
         cmd("help <obj>                        parameters for an object")
         cmd("exit / quit")
         print()
@@ -1422,6 +1439,8 @@ class RaffitaInterpreter:
             return False
         elif verb in ("help", "?"):
             self.cmd_help(rest)
+        elif verb == "man":
+            self.cmd_man(rest)
         elif verb == "create":
             self.cmd_create(rest)
         elif verb == "stage":
@@ -1526,7 +1545,7 @@ class RaffitaInterpreter:
     def _repl_prompt(self) -> str:
         w = lambda c: _RL_S + c + _RL_E
 
-        target_color = GRAY_9
+        target_color = C_SECTION
         if self.active_targets:
             resolved = self._resolve_targets()
             n_alive  = sum(
@@ -1534,9 +1553,9 @@ class RaffitaInterpreter:
                 if h in self.sessions and self.sessions[h].is_alive()
             )
             if resolved and n_alive == len(resolved):
-                target_color = LIGHT_GREEN
+                target_color = C_OK
             elif n_alive > 0:
-                target_color = ORANGE
+                target_color = C_WARN
 
         if not HAS_READLINE:
             if self.active_targets:
@@ -1546,14 +1565,14 @@ class RaffitaInterpreter:
         if self.active_targets:
             label = ",".join(self.active_targets)
             return (
-                w(CYAN_1) + "raffita"
-                + w(GRAY_9) + "("
+                w(C_PARAM) + "raffita"
+                + w(C_SECTION) + "("
                 + w(target_color) + label
-                + w(GRAY_9) + ")"
-                + w(CYAN_1) + "> "
+                + w(C_SECTION) + ")"
+                + w(C_PARAM) + "> "
                 + w(RESET)
             )
-        return w(CYAN_1) + "raffita> " + w(RESET)
+        return w(C_PARAM) + "raffita> " + w(RESET)
 
     def repl(self) -> None:
         self._history.load()
@@ -1652,6 +1671,12 @@ def make_completer(interp: RaffitaInterpreter):
             subs = ["load", "reload", "show", "hosts", "groups", "tags"]
             suggestions = [s for s in subs if s.startswith(prefix)]
 
+        elif idx == 1 and tokens[0].lower() == "man":
+            suggestions = [v for v in sorted(_VERB_HELP) if v.startswith(prefix)]
+
+        elif idx == 1 and tokens[0].lower() == "help":
+            suggestions = [o for o in obj_names if o.startswith(prefix)]
+
         elif idx == 1 and tokens[0].lower() in ("live", "dryrun", "confirm", "parallel", "halt"):
             suggestions = [s for s in ("on", "off") if s.startswith(prefix)]
 
@@ -1702,8 +1727,8 @@ def print_banner() -> None:
                                                    |_|
             VOSS / Fabric Engine  —  one-liner config rollout
 """
-    print(RED_2 + banner + RESET)
-    print(RED_2 + "  by raffita a.k.a. Segi" + RESET)
+    print(C_BANNER + banner + RESET)
+    print(C_BANNER + "  by raffita a.k.a. Segi" + RESET)
     print()
 
 

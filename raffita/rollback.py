@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from .colors import (
-    C_ERROR, C_OK, C_WARN, C_ROLLBACK, C_DIM,
-    CYAN_1, ORANGE, PINK, RESET,
+    C_ERROR, C_OK, C_WARN, C_ROLLBACK, C_DIM, C_HOST, C_CMD, C_CONFIRM,
+    RESET,
 )
 
 if TYPE_CHECKING:
@@ -82,7 +82,7 @@ class RollbackManager:
 
         if confirm:
             try:
-                ans = input(PINK + f"  Execute rollback on {host}? [y/N]: " + RESET).strip().lower()
+                ans = input(C_CONFIRM + f"  Execute rollback on {host}? [y/N]: " + RESET).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 print(C_WARN + "  ⊘  rollback aborted" + RESET)
@@ -130,7 +130,7 @@ class RollbackManager:
             print()
             count = len(bucket)
             print(
-                CYAN_1 + f"  {h}" + RESET
+                C_HOST + f"  {h}" + RESET
                 + C_DIM + f"  {count} entr{'y' if count == 1 else 'ies'}" + RESET
             )
             for i, e in enumerate(reversed(bucket), 1):
@@ -155,7 +155,7 @@ class RollbackManager:
             print(C_DIM + "    (no show output captured)" + RESET)
             return
         for cmd, output in entry.pre_state.items():
-            print(ORANGE + f"  ── {cmd} ──" + RESET)
+            print(C_CMD + f"  ── {cmd} ──" + RESET)
             for line in output.splitlines():
                 print(C_DIM + f"    {line}" + RESET)
 
@@ -185,7 +185,7 @@ class RollbackManager:
         for line in entry.delete_config.splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
-                print(ORANGE + f"       {stripped}" + RESET)
+                print(C_CMD + f"       {stripped}" + RESET)
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────
