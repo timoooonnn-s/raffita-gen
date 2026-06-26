@@ -313,7 +313,7 @@ class RaffitaInterpreter:
         elif self.active_targets:
             hosts = self._resolve_targets()
         else:
-            print(C_ERROR + "  ✖  No target. Set --HOSTNAME or use 'target <host>'." + RESET)
+            print(C_ERROR + "  ✖  No target. Set --HOSTNAME or use 'target <host> [host ...]'." + RESET)
             return None
 
         if not hosts:
@@ -642,7 +642,7 @@ class RaffitaInterpreter:
         elif self.active_targets:
             hosts = self._resolve_targets()
         else:
-            print(C_ERROR + "  ✖  No target. Set --HOSTNAME or use 'target <host>'." + RESET)
+            print(C_ERROR + "  ✖  No target. Set --HOSTNAME or use 'target <host> [host ...]'." + RESET)
             return
 
         if not hosts:
@@ -1087,7 +1087,7 @@ class RaffitaInterpreter:
 
     def _single_target_or_error(self) -> Optional[str]:
         if not self.active_targets:
-            print(C_ERROR + "  ✖  No target set. Use 'target <host>'." + RESET)
+            print(C_ERROR + "  ✖  No target set. Use 'target <host> [host ...]'." + RESET)
             return None
         hosts = self._resolve_targets()
         if len(hosts) != 1:
@@ -1260,6 +1260,17 @@ class RaffitaInterpreter:
         print(C_DIM + f"  Usage:  " + RESET + C_PARAM + _VERB_HELP[verb] + RESET)
 
         _VERB_NOTES: Dict[str, List[str]] = {
+            "target": [
+                "Sets the default host(s) for all subsequent commands.",
+                "Accepts bare hostnames, inventory groups (@group) and tags (@tag:X).",
+                "No inventory required — bare hostnames work without one.",
+                "Multiple hosts can be mixed freely in a single target command.",
+                "Examples:  target sw-core-01",
+                "           target sw-core-01 sw-core-02          (ad-hoc multi-host)",
+                "           target sw-core-01 sw-core-02 @edge    (mix bare + group)",
+                "           target @core                          (inventory group)",
+                "           target none                           (clear target)",
+            ],
             "show": [
                 "Runs the show commands for an object on the active target(s).",
                 "All parameters are optional — omitting them shows all instances.",
@@ -1288,10 +1299,12 @@ class RaffitaInterpreter:
             ],
             "connect": [
                 "Opens SSH connection(s) and sets those hosts as the active target.",
+                "Accepts any number of hosts — no inventory needed for ad-hoc targeting.",
                 "With no arguments, connects to the current active target(s).",
                 "Examples:  connect sw-core-01",
-                "           connect @core",
-                "           connect @tag:access",
+                "           connect sw-core-01 sw-core-02  (multiple hosts, no inventory)",
+                "           connect @core                  (inventory group)",
+                "           connect @tag:access            (inventory tag)",
             ],
             "disconnect": [
                 "Closes SSH connection(s).",
@@ -1379,8 +1392,8 @@ class RaffitaInterpreter:
         cmd("command [--live|--dry] --CMD \"cmd\" ...  exec-mode commands")
 
         section("Session")
-        cmd("target <host|@group|@tag:X> ...   set / clear the default target(s)")
-        cmd("connect [host|@group|@tag:X] ...  open SSH connection(s)")
+        cmd("target <host> [host ...] [@group]  set / clear default target(s)  (no inventory needed)")
+        cmd("connect [host] [host ...] [@group]  open SSH connection(s)  (sets target too)")
         cmd("disconnect [host|@group] ...      close connection(s)")
         cmd("reconnect [host|@group|--all]     reconnect dropped session(s)")
         cmd("ping [host|@group] ...            TCP:22 reachability check")
@@ -1685,7 +1698,13 @@ def make_completer(interp: RaffitaInterpreter):
                 suggestions = [f for f in flags if f.startswith(prefix)]
 
         elif tokens[0].lower() in ("target", "connect", "reconnect", "disconnect", "ping"):
-            suggestions = [c for c in _host_choices() if c.startswith(prefix)]
+            already  = set(tokens[1:])
+            choices  = [c for c in _host_choices() if c not in already]
+            # Also include known session hosts (useful when no inventory is loaded)
+            for h in interp.sessions:
+                if h not in already and h not in choices:
+                    choices.append(h)
+            suggestions = [c for c in choices if c.startswith(prefix)]
 
         elif idx >= 1 and tokens[0].lower() == "command":
             prev = tokens[idx - 1] if idx > 0 else ""
