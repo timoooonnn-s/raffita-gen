@@ -1755,68 +1755,6 @@ def make_completer(interp: RaffitaInterpreter):
     return completer
 
 
-def make_display_hook(interp: RaffitaInterpreter):
-    def display_matches(substitution: str, matches: List[str], longest: int) -> None:
-        buffer = readline.get_line_buffer() if HAS_READLINE else ""
-        try:
-            toks = shlex.split(buffer)
-        except ValueError:
-            toks = buffer.split()
-
-        # readline already called rl_crlf() before invoking us — no leading newline needed
-
-        # Parameter completion for an object verb — group by required / optional
-        if (len(toks) >= 2
-                and toks[0].lower() in OBJ_VERBS
-                and all(m.startswith("--") for m in matches)):
-            obj = toks[1].lower()
-            if obj in OBJECTS:
-                schema = OBJECTS[obj]["schema"]
-                required: List[str] = []
-                optional: List[str] = []
-                for m in matches:
-                    name = m[2:]
-                    if schema.get(name, {}).get("required"):
-                        required.append(m)
-                    else:
-                        optional.append(m)
-
-                if required:
-                    print(C_ERROR + "  required:" + RESET)
-                    for p in required:
-                        name     = p[2:]
-                        help_txt = schema.get(name, {}).get("help", "")
-                        print(f"    {C_ERROR}{p:<28}{RESET}  {C_DIM}{help_txt}{RESET}")
-                if optional:
-                    if required:
-                        print()
-                    print(C_SECTION + "  optional:" + RESET)
-                    for p in optional:
-                        name     = p[2:]
-                        cfg      = schema.get(name, {})
-                        help_txt = cfg.get("help", "")
-                        default  = cfg.get("default")
-                        extra    = f"  [{default}]" if default is not None else ""
-                        print(f"    {C_DIM}{p:<28}{RESET}  {C_DIM}{help_txt}{extra}{RESET}")
-                print()
-                return
-
-        # Default: simple columnar display
-        try:
-            term_w = os.get_terminal_size().columns
-        except Exception:
-            term_w = 80
-        col_w = min(longest + 2, term_w)
-        cols  = max(1, term_w // col_w)
-        for i, m in enumerate(matches):
-            print(f"  {m:<{col_w}}", end="\n" if (i + 1) % cols == 0 else "")
-        if matches and len(matches) % cols != 0:
-            print()
-        print()
-
-    return display_matches
-
-
 def setup_readline(interp: RaffitaInterpreter) -> None:
     if not HAS_READLINE:
         return
@@ -1829,10 +1767,6 @@ def setup_readline(interp: RaffitaInterpreter) -> None:
     except Exception:
         pass
     readline.set_completer(make_completer(interp))
-    try:
-        readline.set_completion_display_matches_hook(make_display_hook(interp))
-    except AttributeError:
-        pass
 
 
 # ── Banner / entry point ──────────────────────────────────────────────────────
