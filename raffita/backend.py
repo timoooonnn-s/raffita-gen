@@ -189,6 +189,7 @@ class SwitchSession:
             return
         self.ensure_alive()
         print(C_PREP + f"  ·  [{self.host}]  enable / term more disable" + RESET)
+        ok = True
         for cmd in ("enable", "term more disable"):
             self.logger.info("[%s] PREP_BASIC: %s", self.host, cmd)
             try:
@@ -199,7 +200,8 @@ class SwitchSession:
                     self.logger.info("[%s] OUT: %s", self.host, out.strip())
             except Exception as exc:
                 self.logger.error("[%s] PREP_BASIC '%s' failed: %s", self.host, cmd, exc)
-        self.prepared_basic = True
+                ok = False
+        self.prepared_basic = ok
 
     def _prepare_config(self) -> None:
         if self.prepared_config:
@@ -213,9 +215,9 @@ class SwitchSession:
             )
             if out:
                 self.logger.info("[%s] OUT: %s", self.host, out.strip())
+            self.prepared_config = True
         except Exception as exc:
             self.logger.error("[%s] PREP_CONFIG failed: %s", self.host, exc)
-        self.prepared_config = True
 
     def _exit_config_and_save(self) -> None:
         if not self.prepared_config:
@@ -261,6 +263,9 @@ class SwitchSession:
                     self.host, attempt, command, exc,
                 )
                 if attempt > self.reconnect_attempts:
+                    raise
+                # Don't retry auth failures — repeated attempts risk account lockout
+                if "auth" in type(exc).__name__.lower():
                     raise
                 self.reconnect()
                 if exec_mode:

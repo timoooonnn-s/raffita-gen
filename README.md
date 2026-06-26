@@ -245,12 +245,16 @@ raffita> ping @tag:access
 
 ## Watch Mode
 
-Repeat any command on a fixed interval (Ctrl-C to stop):
+Repeat any command on a fixed interval:
 
 ```
 raffita> watch 30 show vlan --VLAN_ID 100
 raffita> watch 60 command --CMD show virtual-ist
 ```
+
+- **Ctrl-C during a confirm prompt** (`Push to host? [y/N]`) aborts that single
+  iteration — the watch loop keeps running.
+- **Ctrl-C during the sleep between iterations** stops the entire watch.
 
 ---
 
@@ -270,6 +274,13 @@ raffita> rollback clear --all  # clear all stacks
 ```
 
 The stack is session-scoped (not persisted to disk).
+
+> **Note:** Objects without a delete config (`cluster`, `ntp`, `snmp`, `spbm`) do not
+> register rollback entries. Raffita prints a notice after each push for these objects
+> so you know rollback is unavailable.
+>
+> `rollback all` — if you abort one confirm or a push fails mid-way, the remaining
+> entry count is shown so you know what's left.
 
 ---
 

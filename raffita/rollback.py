@@ -81,7 +81,12 @@ class RollbackManager:
         self._print_entry_detail(entry)
 
         if confirm:
-            ans = input(PINK + f"  Execute rollback on {host}? [y/N]: " + RESET).strip().lower()
+            try:
+                ans = input(PINK + f"  Execute rollback on {host}? [y/N]: " + RESET).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                print(C_WARN + "  ⊘  rollback aborted" + RESET)
+                return False
             if ans not in ("y", "yes"):
                 print(C_WARN + "  ⊘  rollback aborted" + RESET)
                 return False
@@ -104,6 +109,9 @@ class RollbackManager:
         count = 0
         while self._stacks.get(host):
             if not self.rollback_last(host, session, confirm=confirm):
+                remaining = len(self._stacks.get(host, []))
+                if remaining:
+                    print(C_DIM + f"  ·  {remaining} rollback{'s' if remaining != 1 else ''} remaining  (run 'rollback all' to continue)" + RESET)
                 break
             count += 1
         if count:

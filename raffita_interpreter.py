@@ -240,6 +240,12 @@ class RaffitaInterpreter:
     # ── Option parsing ────────────────────────────────────────────────────────
 
     @staticmethod
+    def _pop_live_dry(tokens: List[str]) -> Tuple[bool, bool, List[str]]:
+        force_live = "--live" in tokens
+        force_dry  = "--dry"  in tokens
+        return force_live, force_dry, [t for t in tokens if t not in ("--live", "--dry")]
+
+    @staticmethod
     def _parse_obj_opts(tokens: List[str]) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
         if not tokens:
             return None, {}, "Object name required."
@@ -419,7 +425,7 @@ class RaffitaInterpreter:
 
         if obj_name and params and obj_name in OBJECTS:
             spec = OBJECTS[obj_name]
-            if spec.get("delete") and params:
+            if spec.get("delete"):
                 try:
                     self._rollback.register(
                         host=host,
@@ -429,6 +435,8 @@ class RaffitaInterpreter:
                     )
                 except Exception as exc:
                     self.logger.warning("rollback registration failed host=%s: %s", host, exc)
+            else:
+                print(C_DIM + f"  ·  rollback not available for '{obj_name}'" + RESET)
 
         return True
 
@@ -507,9 +515,7 @@ class RaffitaInterpreter:
     # ── Verb handlers ─────────────────────────────────────────────────────────
 
     def cmd_create(self, tokens: List[str]) -> None:
-        force_live = "--live" in tokens
-        force_dry  = "--dry"  in tokens
-        tokens     = [t for t in tokens if t not in ("--live", "--dry")]
+        force_live, force_dry, tokens = self._pop_live_dry(tokens)
 
         obj, opts, err = self._parse_obj_opts(tokens)
         if err:
@@ -550,9 +556,7 @@ class RaffitaInterpreter:
             self.logger.info("STAGED %s -> staging/%s.raffita", obj, host)
 
     def cmd_deploy(self, tokens: List[str]) -> None:
-        force_live = "--live" in tokens
-        force_dry  = "--dry"  in tokens
-        tokens     = [t for t in tokens if t not in ("--live", "--dry")]
+        force_live, force_dry, tokens = self._pop_live_dry(tokens)
 
         if tokens:
             files = [f for f in tokens if f.endswith(".raffita") and os.path.isfile(f)]
@@ -621,6 +625,7 @@ class RaffitaInterpreter:
                     session.connect()
                 except Exception as exc:
                     print(C_ERROR + f"  ✖  Cannot connect to {host}: {exc}" + RESET)
+                    self.logger.error("AUTO-CONNECT failed host=%s: %s", host, exc)
                     self.sessions.pop(host, None)
                     continue
 
@@ -629,10 +634,7 @@ class RaffitaInterpreter:
                 print()
                 for cmd, output in results.items():
                     print(C_CMD + f"  ⟶  {cmd}" + RESET)
-                    for line in (output or "").splitlines():
-                        stripped = line.strip()
-                        if stripped:
-                            print(C_OUTPUT + "       " + stripped + RESET)
+                    session._print_output(output or "")
             except Exception as exc:
                 print(C_ERROR + f"  ✖  Show error on {host}: {exc}" + RESET)
 
@@ -640,9 +642,7 @@ class RaffitaInterpreter:
         if not self._have_login():
             print(C_ERROR + "  ✖  No login set. Run 'login' first." + RESET); return
 
-        force_live = "--live" in tokens
-        force_dry  = "--dry"  in tokens
-        tokens     = [t for t in tokens if t not in ("--live", "--dry")]
+        force_live, force_dry, tokens = self._pop_live_dry(tokens)
 
         cmds: List[str]     = []
         host: Optional[str] = None
@@ -903,13 +903,18 @@ class RaffitaInterpreter:
         if not command:
             print(C_ERROR + "  ✖  watch: no command specified" + RESET); return
         print(C_INFO + f"  ⏱  watching every {interval}s  ·  Ctrl-C to stop" + RESET)
-        try:
-            while True:
+        while True:
+            try:
                 self.dispatch(command)
+            except KeyboardInterrupt:
+                print()
+                print(C_WARN + "  ⊘  iteration skipped  —  Ctrl-C again to stop watch" + RESET)
+            try:
                 time.sleep(interval)
-        except KeyboardInterrupt:
-            print()
-            print(C_OK + "  ✔  watch stopped" + RESET)
+            except KeyboardInterrupt:
+                break
+        print()
+        print(C_OK + "  ✔  watch stopped" + RESET)
 
     # ── Env ───────────────────────────────────────────────────────────────────
 
@@ -1320,7 +1325,7 @@ class RaffitaInterpreter:
                     f"{entry['time']}  {entry['status']:<8} "
                     f"{entry['host']:<20}  {entry['action']}"
                 )
-                if entry.get("cmd_count"):
+                if entry["cmd_count"] > 0:
                     line += f"  ({entry['cmd_count']} cmds)"
                 f.write(line + "\n")
         print(C_DIM + f"  ✎  session summary → {filename}" + RESET)
