@@ -5,8 +5,10 @@ import concurrent.futures
 import io
 import os
 import shlex
+import socket
 import sys
 import threading
+import time
 from datetime import datetime
 from getpass import getpass
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,10 +22,10 @@ except ImportError:
 
 from raffita.colors import (
     BOLD, RESET, WHITE,
-    RED, ORANGE, BRIGHT_ORANGE, LIGHT_GREEN, PINK,
+    RED, RED_3, ORANGE, BRIGHT_ORANGE, LIGHT_GREEN, PINK,
     CYAN_1, LIGHT_CYAN, GRAY_6, GRAY_7, GRAY_9, GRAY_10,
-    YELLOW_GREEN_2, C_ERROR, C_OK, C_WARN, C_INFO, C_HOST,
-    C_CMD, C_DIM, C_DRYRUN, C_STAGE, C_ROLLBACK, C_PREP,
+    YELLOW_GREEN_2, MAGENTA_1, C_ERROR, C_OK, C_WARN, C_INFO, C_HOST,
+    C_CMD, C_OUTPUT, C_DIM, C_DRYRUN, C_STAGE, C_ROLLBACK, C_PREP,
     RED_2,
 )
 from raffita.param_filling import resolve_params, print_param_errors
@@ -36,20 +38,29 @@ from raffita.rollback import get_rollback_manager
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 VERBS = [
-    "create", "stage", "deploy",
+    "create", "stage", "deploy", "show",
     "target", "connect", "disconnect", "reconnect", "targets", "sessions",
     "live", "dryrun", "confirm", "parallel", "halt", "status", "login",
     "objects", "help", "exit", "quit", "command",
     "rollback", "inventory",
+    "ping", "set", "unset", "watch", "clear", "env",
 ]
 
-OBJ_VERBS = ("create", "stage")
+OBJ_VERBS = ("create", "stage", "show")
 
 _DIV = "─" * 56
 
-# readline prompt escape wrappers (prevent readline miscounting widths)
 _RL_S = "\001"
 _RL_E = "\002"
+
+_PROJECT_ROOT      = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_INVENTORY = os.path.join(_PROJECT_ROOT, "inventory", "inventory.yaml")
+_ENV_FILE          = os.path.join(_PROJECT_ROOT, ".env")
+
+_PARALLEL_COLORS = [
+    CYAN_1, LIGHT_GREEN, ORANGE, PINK,
+    YELLOW_GREEN_2, MAGENTA_1, LIGHT_CYAN, RED_3,
+]
 
 
 # ── Parallel output capture ───────────────────────────────────────────────────
@@ -89,6 +100,23 @@ class _ParallelCapture:
         self._local.buf = None
 
 
+# ── .env helpers ──────────────────────────────────────────────────────────────
+
+def _parse_dotenv(path: str) -> Dict[str, str]:
+    vals: Dict[str, str] = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            vals[key.strip()] = val
+    return vals
+
+
 # ── Interpreter ───────────────────────────────────────────────────────────────
 
 class RaffitaInterpreter:
@@ -105,11 +133,12 @@ class RaffitaInterpreter:
         self.logger          = get_logger(logfile)
         self.logfile         = logfile
 
-        self._history         = HistoryManager()
-        self._inventory       = get_inventory()
-        self._rollback        = get_rollback_manager()
-        self._session_actions: List[dict] = []
-        self._session_start   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._history          = HistoryManager()
+        self._inventory        = get_inventory()
+        self._rollback         = get_rollback_manager()
+        self._session_actions: List[dict]          = []
+        self._param_defaults:  Dict[str, Dict[str, Any]] = {}
+        self._session_start    = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # ── Login ─────────────────────────────────────────────────────────────────
 
@@ -119,12 +148,46 @@ class RaffitaInterpreter:
         self.password = getpass(f"  {GRAY_9}Password:{RESET} ")
         if self.username:
             print(C_OK + f"  ✔  credentials set for '{self.username}'" + RESET)
+            try:
+                ans = input(f"  {GRAY_9}Save to .env? [y/N]:{RESET} ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                ans = ""
+            if ans in ("y", "yes"):
+                self._save_env()
         else:
             print(C_WARN + "  ⚠  No username set. Use 'login' before going live." + RESET)
         print()
 
     def _have_login(self) -> bool:
         return bool(self.username)
+
+    def _load_env(self, silent: bool = False) -> bool:
+        if not os.path.isfile(_ENV_FILE):
+            return False
+        try:
+            vals = _parse_dotenv(_ENV_FILE)
+            user = vals.get("RAFFITA_USER", "").strip()
+            pw   = vals.get("RAFFITA_PASS", "").strip()
+            if user:
+                self.username = user
+                self.password = pw
+                if not silent:
+                    print(C_OK + f"  ✔  credentials loaded from .env  ({user})" + RESET)
+                return True
+        except Exception as exc:
+            if not silent:
+                print(C_ERROR + f"  ✖  Failed to load .env: {exc}" + RESET)
+        return False
+
+    def _save_env(self) -> None:
+        try:
+            with open(_ENV_FILE, "w", encoding="utf-8") as f:
+                f.write(f"RAFFITA_USER={self.username or ''}\n")
+                f.write(f"RAFFITA_PASS={self.password or ''}\n")
+            print(C_OK + f"  ✔  credentials saved to .env" + RESET)
+        except Exception as exc:
+            print(C_ERROR + f"  ✖  Failed to save .env: {exc}" + RESET)
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
@@ -153,7 +216,6 @@ class RaffitaInterpreter:
     # ── Target resolution ─────────────────────────────────────────────────────
 
     def _resolve_targets(self, refs: Optional[List[str]] = None) -> List[str]:
-        """Resolve active_targets (or given refs) to a flat, deduplicated host list."""
         source = refs if refs is not None else self.active_targets
         seen: set = set()
         result: List[str] = []
@@ -163,6 +225,17 @@ class RaffitaInterpreter:
                     seen.add(host)
                     result.append(host)
         return result
+
+    # ── Session action logging ────────────────────────────────────────────────
+
+    def _log_action(self, host: str, action: str, status: str, cmd_count: int = 0) -> None:
+        self._session_actions.append({
+            "time":      datetime.now().strftime("%H:%M:%S"),
+            "host":      host,
+            "action":    action,
+            "status":    status,
+            "cmd_count": cmd_count,
+        })
 
     # ── Option parsing ────────────────────────────────────────────────────────
 
@@ -194,15 +267,18 @@ class RaffitaInterpreter:
     def _build_configs(
         self,
         obj_name: str,
-        opts: Dict[str, Any],
+        opts:     Dict[str, Any],
     ) -> Optional[List[Tuple[str, str, dict]]]:
         spec   = OBJECTS[obj_name]
         schema = spec["schema"]
 
-        # Explicit --HOSTNAME takes priority; otherwise use all active targets.
         explicit = opts.get("HOSTNAME") or opts.get("hostname")
         if explicit:
-            hosts = self._resolve_targets([str(explicit)]) if str(explicit).startswith("@") else [str(explicit)]
+            hosts = (
+                self._resolve_targets([str(explicit)])
+                if str(explicit).startswith("@")
+                else [str(explicit)]
+            )
         elif self.active_targets:
             hosts = self._resolve_targets()
         else:
@@ -213,10 +289,16 @@ class RaffitaInterpreter:
             return None
 
         results: List[Tuple[str, str, dict]] = []
-
         for host in hosts:
-            per_host_opts          = dict(opts)
+            per_host_opts             = dict(opts)
             per_host_opts["HOSTNAME"] = host
+
+            # Inject per-object param defaults (lower priority than explicit opts)
+            existing_upper = {k.upper() for k in per_host_opts}
+            for param, val in self._param_defaults.get(obj_name, {}).items():
+                if param.upper() not in existing_upper:
+                    per_host_opts[param] = val
+
             params, missing, errors = resolve_params(schema, per_host_opts)
             if errors or missing:
                 print(C_ERROR + f"  ✖  [{host}] parameter errors:" + RESET)
@@ -227,6 +309,9 @@ class RaffitaInterpreter:
                 built = spec["build"](params)
             except ValueError as exc:
                 print(C_ERROR + f"  ✖  [{host}] {exc}" + RESET)
+                continue
+            except Exception as exc:
+                print(C_ERROR + f"  ✖  [{host}] {type(exc).__name__}: {exc}" + RESET)
                 continue
 
             if spec.get("multi_host"):
@@ -248,7 +333,6 @@ class RaffitaInterpreter:
         params:       Optional[dict] = None,
         skip_confirm: bool           = False,
     ) -> bool:
-        """Push config to a single host. Returns True on success or dry-run, False on error/abort."""
         cmd_count = sum(
             1 for line in config.splitlines()
             if line.strip() and not line.strip().startswith("#")
@@ -271,11 +355,7 @@ class RaffitaInterpreter:
                 c = line.strip()
                 if c and not c.startswith("#"):
                     self.logger.info("[DRY-RUN %s] would send: %s", host, c)
-            self._session_actions.append({
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "host": host, "action": action,
-                "status": "dry-run", "cmd_count": cmd_count,
-            })
+            self._log_action(host, action, "dry-run", cmd_count)
             return True
 
         if not self._have_login():
@@ -297,7 +377,6 @@ class RaffitaInterpreter:
 
         session = self._get_session(host)
 
-        # Auto-connect if the session has never been opened (or dropped)
         if not session.is_alive():
             print(C_PREP + f"  ·  [{host}]  connecting …" + RESET)
             try:
@@ -305,14 +384,10 @@ class RaffitaInterpreter:
             except Exception as exc:
                 print(C_ERROR + f"  ✖  Cannot connect to {host}: {exc}" + RESET)
                 self.logger.error("AUTO-CONNECT failed host=%s: %s", host, exc)
-                self._session_actions.append({
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "host": host, "action": action,
-                    "status": "error", "cmd_count": cmd_count,
-                })
+                self.sessions.pop(host, None)
+                self._log_action(host, action, "error", cmd_count)
                 return False
 
-        # Pre-state capture for rollback
         pre_state: Dict[str, str] = {}
         if obj_name and params and obj_name in OBJECTS:
             spec = OBJECTS[obj_name]
@@ -331,11 +406,7 @@ class RaffitaInterpreter:
             print()
             print(C_ERROR + f"  ✖  Error on {host}: {exc}" + RESET)
             self.logger.error("ERROR %s host=%s: %s", action, host, exc)
-            self._session_actions.append({
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "host": host, "action": action,
-                "status": "error", "cmd_count": cmd_count,
-            })
+            self._log_action(host, action, "error", cmd_count)
             return False
 
         print()
@@ -344,13 +415,8 @@ class RaffitaInterpreter:
         else:
             print(C_OK + f"  ✔  {action}  ·  {host}  ·  {cmd_count} command{'s' if cmd_count != 1 else ''}" + RESET)
 
-        self._session_actions.append({
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "host": host, "action": action,
-            "status": "ok", "cmd_count": cmd_count,
-        })
+        self._log_action(host, action, "ok", cmd_count)
 
-        # Rollback registration
         if obj_name and params and obj_name in OBJECTS:
             spec = OBJECTS[obj_name]
             if spec.get("delete") and params:
@@ -382,8 +448,9 @@ class RaffitaInterpreter:
         except Exception as exc:
             print(C_ERROR + f"  ✖  [{host}] unexpected error: {exc}" + RESET)
         finally:
+            output = buf.getvalue()
             cap.release_thread()
-        return buf.getvalue(), ok
+        return output, ok
 
     def _push_parallel(
         self,
@@ -391,7 +458,6 @@ class RaffitaInterpreter:
         action:   str,
         obj_name: Optional[str] = None,
     ) -> bool:
-        """Push to multiple hosts concurrently. Returns True if all succeeded."""
         if not configs:
             return True
 
@@ -410,30 +476,41 @@ class RaffitaInterpreter:
                 return False
 
         print(C_INFO + f"  ⇶  parallel push → {len(configs)} hosts" + RESET)
+        colors = [_PARALLEL_COLORS[i % len(_PARALLEL_COLORS)] for i in range(len(configs))]
 
-        all_ok = True
+        fut_results: List[Tuple[str, bool]] = []
         with _ParallelCapture() as cap:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(configs)) as pool:
                 futs = [
                     pool.submit(self._push_worker, cap, h, c, action, obj_name, p)
                     for h, c, p in configs
                 ]
-            # Print buffered output in submission order after all threads finish
             for fut in futs:
                 try:
-                    output, ok = fut.result()
-                    print(output, end="", flush=True)
-                    if not ok:
-                        all_ok = False
+                    fut_results.append(fut.result())
                 except Exception as exc:
-                    print(C_ERROR + f"  ✖  Worker thread failed: {exc}" + RESET)
-                    all_ok = False
+                    fut_results.append(
+                        (C_ERROR + f"  ✖  Worker thread error: {exc}" + RESET + "\n", False)
+                    )
+
+        # Print in submission order — outside capture context so it goes to real stdout
+        all_ok = True
+        for (host, _, _), color, (output, ok) in zip(configs, colors, fut_results):
+            print(color + f"  ── {host} " + "─" * max(0, 46 - len(host)) + RESET)
+            for line in output.splitlines():
+                print(line, flush=True)
+            if not ok:
+                all_ok = False
 
         return all_ok
 
     # ── Verb handlers ─────────────────────────────────────────────────────────
 
     def cmd_create(self, tokens: List[str]) -> None:
+        force_live = "--live" in tokens
+        force_dry  = "--dry"  in tokens
+        tokens     = [t for t in tokens if t not in ("--live", "--dry")]
+
         obj, opts, err = self._parse_obj_opts(tokens)
         if err:
             print(C_ERROR + f"  ✖  {err}" + RESET); return
@@ -442,14 +519,21 @@ class RaffitaInterpreter:
         configs = self._build_configs(obj, opts)
         if configs is None:
             return
-        if self.parallel and len(configs) > 1:
-            self._push_parallel(configs, "create", obj_name=obj)
-        else:
-            for host, config, params in configs:
-                ok = self._push(host, config, "create", obj_name=obj, params=params)
-                if not ok and self.halt_on_error:
-                    print(C_WARN + "  ⊘  halted on error  (halt off  to disable)" + RESET)
-                    break
+
+        orig_dry = self.dry_run
+        if force_live: self.dry_run = False
+        elif force_dry: self.dry_run = True
+        try:
+            if self.parallel and len(configs) > 1:
+                self._push_parallel(configs, "create", obj_name=obj)
+            else:
+                for host, config, params in configs:
+                    ok = self._push(host, config, "create", obj_name=obj, params=params)
+                    if not ok and self.halt_on_error:
+                        print(C_WARN + "  ⊘  halted on error  (halt off  to disable)" + RESET)
+                        break
+        finally:
+            self.dry_run = orig_dry
 
     def cmd_stage(self, tokens: List[str]) -> None:
         from raffita.gen_lib import save_to_file
@@ -466,6 +550,10 @@ class RaffitaInterpreter:
             self.logger.info("STAGED %s -> staging/%s.raffita", obj, host)
 
     def cmd_deploy(self, tokens: List[str]) -> None:
+        force_live = "--live" in tokens
+        force_dry  = "--dry"  in tokens
+        tokens     = [t for t in tokens if t not in ("--live", "--dry")]
+
         if tokens:
             files = [f for f in tokens if f.endswith(".raffita") and os.path.isfile(f)]
         else:
@@ -482,18 +570,79 @@ class RaffitaInterpreter:
         if not files:
             print(C_WARN + "  No .raffita files found in staging/." + RESET); return
 
-        for f in files:
-            hostname = os.path.splitext(os.path.basename(f))[0]
-            with open(f, "r", encoding="utf-8") as fh:
-                config = fh.read()
-            ok = self._push(hostname, config, f"deploy ({os.path.basename(f)})")
-            if not ok and self.halt_on_error:
-                print(C_WARN + "  ⊘  halted on error  (halt off  to disable)" + RESET)
-                break
+        orig_dry = self.dry_run
+        if force_live: self.dry_run = False
+        elif force_dry: self.dry_run = True
+        try:
+            for f in files:
+                hostname = os.path.splitext(os.path.basename(f))[0]
+                with open(f, "r", encoding="utf-8") as fh:
+                    config = fh.read()
+                ok = self._push(hostname, config, f"deploy ({os.path.basename(f)})")
+                if not ok and self.halt_on_error:
+                    print(C_WARN + "  ⊘  halted on error  (halt off  to disable)" + RESET)
+                    break
+        finally:
+            self.dry_run = orig_dry
+
+    def cmd_show(self, tokens: List[str]) -> None:
+        obj, opts, err = self._parse_obj_opts(tokens)
+        if err:
+            print(C_ERROR + f"  ✖  {err}" + RESET); return
+        if obj not in OBJECTS:
+            print(C_ERROR + f"  ✖  Unknown object '{obj}'. 'objects' lists all." + RESET); return
+        spec = OBJECTS[obj]
+        if not spec.get("show"):
+            print(C_WARN + f"  ⚠  '{obj}' has no show commands defined." + RESET); return
+
+        configs = self._build_configs(obj, opts)
+        if not configs:
+            return
+
+        for host, _cfg, params in configs:
+            show_cmds = spec["show"](params)
+            print()
+            print(C_HOST + f"  ▶  {host}" + RESET + "  " + BOLD + WHITE + f"show {obj}" + RESET)
+
+            if self.dry_run:
+                print(C_DRYRUN + "  ⊘  dry-run  —  commands that would be sent:" + RESET)
+                for cmd in show_cmds:
+                    print(YELLOW_GREEN_2 + "  " + cmd + RESET)
+                continue
+
+            if not self._have_login():
+                print(C_ERROR + "  ✖  No login set. Run 'login' before going live." + RESET)
+                return
+
+            session = self._get_session(host)
+            if not session.is_alive():
+                print(C_PREP + f"  ·  [{host}]  connecting …" + RESET)
+                try:
+                    session.connect()
+                except Exception as exc:
+                    print(C_ERROR + f"  ✖  Cannot connect to {host}: {exc}" + RESET)
+                    self.sessions.pop(host, None)
+                    continue
+
+            try:
+                results = session.send_show(show_cmds)
+                print()
+                for cmd, output in results.items():
+                    print(C_CMD + f"  ⟶  {cmd}" + RESET)
+                    for line in (output or "").splitlines():
+                        stripped = line.strip()
+                        if stripped:
+                            print(C_OUTPUT + "       " + stripped + RESET)
+            except Exception as exc:
+                print(C_ERROR + f"  ✖  Show error on {host}: {exc}" + RESET)
 
     def cmd_command(self, tokens: List[str]) -> None:
         if not self._have_login():
             print(C_ERROR + "  ✖  No login set. Run 'login' first." + RESET); return
+
+        force_live = "--live" in tokens
+        force_dry  = "--dry"  in tokens
+        tokens     = [t for t in tokens if t not in ("--live", "--dry")]
 
         cmds: List[str]     = []
         host: Optional[str] = None
@@ -531,16 +680,22 @@ class RaffitaInterpreter:
         else:
             print(C_ERROR + "  ✖  No connected sessions and no target set." + RESET); return
 
-        config = "\n".join(cmds) + "\n"
-        if self.parallel and len(targets) > 1:
-            configs_list = [(t, config, {}) for t in targets]
-            self._push_parallel(configs_list, "command")
-        else:
-            for t in targets:
-                ok = self._push(t, config, action="command")
-                if not ok and self.halt_on_error:
-                    print(C_WARN + "  ⊘  halted on error  (halt off  to disable)" + RESET)
-                    break
+        config   = "\n".join(cmds) + "\n"
+        orig_dry = self.dry_run
+        if force_live: self.dry_run = False
+        elif force_dry: self.dry_run = True
+        try:
+            if self.parallel and len(targets) > 1:
+                configs_list = [(t, config, {}) for t in targets]
+                self._push_parallel(configs_list, "command")
+            else:
+                for t in targets:
+                    ok = self._push(t, config, action="command")
+                    if not ok and self.halt_on_error:
+                        print(C_WARN + "  ⊘  halted on error  (halt off  to disable)" + RESET)
+                        break
+        finally:
+            self.dry_run = orig_dry
 
     # ── Target / connect / sessions ───────────────────────────────────────────
 
@@ -587,6 +742,7 @@ class RaffitaInterpreter:
                 print(C_OK + f"  ✔  connected to {host}" + RESET)
             except Exception as exc:
                 print(C_ERROR + f"  ✖  Connection to {host} failed: {exc}" + RESET)
+                self.sessions.pop(host, None)
 
     def cmd_reconnect(self, tokens: List[str]) -> None:
         if not self._have_login():
@@ -642,6 +798,154 @@ class RaffitaInterpreter:
             rb_tag = C_ROLLBACK + f"  [{depth} rollback{'s' if depth != 1 else ''}]" + RESET if depth else ""
             print(f"  {C_HOST}{host:<30}{RESET}  {state}{marker}{rb_tag}")
         print()
+
+    # ── Ping ──────────────────────────────────────────────────────────────────
+
+    def cmd_ping(self, tokens: List[str]) -> None:
+        if tokens:
+            hosts = self._resolve_targets(tokens)
+        elif self.active_targets:
+            hosts = self._resolve_targets()
+        else:
+            print(C_ERROR + "  ✖  Usage: ping <host|@group|@tag:X>" + RESET)
+            return
+        if not hosts:
+            print(C_WARN + "  ⚠  No hosts resolved." + RESET); return
+        print()
+        for host in hosts:
+            try:
+                with socket.create_connection((host, 22), timeout=3):
+                    reachable = True
+            except OSError:
+                reachable = False
+            if reachable:
+                print(C_OK + f"  ✔  {host:<30}  TCP:22 reachable" + RESET)
+            else:
+                print(C_ERROR + f"  ✖  {host:<30}  TCP:22 unreachable" + RESET)
+        print()
+
+    # ── Set / unset ───────────────────────────────────────────────────────────
+
+    def cmd_set(self, tokens: List[str]) -> None:
+        if not tokens:
+            if not self._param_defaults:
+                print(C_DIM + "  No defaults set.  Usage: set <obj> <PARAM> <value>" + RESET)
+                return
+            print()
+            for obj, params in sorted(self._param_defaults.items()):
+                print(C_HOST + f"  {obj}:" + RESET)
+                for k, v in sorted(params.items()):
+                    print(f"    {CYAN_1}--{k:<20}{RESET}  {GRAY_9}{v}{RESET}")
+            print()
+            return
+
+        obj = tokens[0].lower()
+        if obj not in OBJECTS:
+            print(C_ERROR + f"  ✖  Unknown object '{obj}'. 'objects' lists all." + RESET); return
+
+        if len(tokens) == 1:
+            defaults = self._param_defaults.get(obj, {})
+            if not defaults:
+                print(C_DIM + f"  No defaults set for '{obj}'." + RESET)
+            else:
+                print()
+                print(C_HOST + f"  {obj} defaults:" + RESET)
+                for k, v in sorted(defaults.items()):
+                    print(f"    {CYAN_1}--{k:<20}{RESET}  {GRAY_9}{v}{RESET}")
+                print()
+            return
+
+        if len(tokens) < 3:
+            print(C_ERROR + "  ✖  Usage: set <obj> <PARAM> <value>" + RESET); return
+
+        param = tokens[1].upper()
+        value = " ".join(tokens[2:])
+        if obj not in self._param_defaults:
+            self._param_defaults[obj] = {}
+        self._param_defaults[obj][param] = value
+        print(C_OK + f"  ✔  default: {obj} --{param} = {value}" + RESET)
+
+    def cmd_unset(self, tokens: List[str]) -> None:
+        if not tokens:
+            print(C_ERROR + "  ✖  Usage: unset <obj> [<PARAM>]" + RESET); return
+        obj = tokens[0].lower()
+        if obj not in OBJECTS:
+            print(C_ERROR + f"  ✖  Unknown object '{obj}'." + RESET); return
+        if len(tokens) == 1:
+            if obj in self._param_defaults:
+                del self._param_defaults[obj]
+                print(C_OK + f"  ✔  all defaults cleared for '{obj}'" + RESET)
+            else:
+                print(C_DIM + f"  No defaults set for '{obj}'." + RESET)
+        else:
+            param = tokens[1].upper()
+            if obj in self._param_defaults and param in self._param_defaults[obj]:
+                del self._param_defaults[obj][param]
+                if not self._param_defaults[obj]:
+                    del self._param_defaults[obj]
+                print(C_OK + f"  ✔  cleared: {obj} --{param}" + RESET)
+            else:
+                print(C_DIM + f"  No default for '{obj}' --{param}." + RESET)
+
+    # ── Watch ─────────────────────────────────────────────────────────────────
+
+    def cmd_watch(self, tokens: List[str]) -> None:
+        if not tokens:
+            print(C_ERROR + "  ✖  Usage: watch <seconds> <command>" + RESET); return
+        try:
+            interval = int(tokens[0])
+            if interval < 1:
+                raise ValueError
+        except ValueError:
+            print(C_ERROR + f"  ✖  watch: interval must be a positive integer, got '{tokens[0]}'" + RESET)
+            return
+        command = " ".join(tokens[1:])
+        if not command:
+            print(C_ERROR + "  ✖  watch: no command specified" + RESET); return
+        print(C_INFO + f"  ⏱  watching every {interval}s  ·  Ctrl-C to stop" + RESET)
+        try:
+            while True:
+                self.dispatch(command)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            print()
+            print(C_OK + "  ✔  watch stopped" + RESET)
+
+    # ── Env ───────────────────────────────────────────────────────────────────
+
+    def cmd_env(self, tokens: List[str]) -> None:
+        sub = tokens[0].lower() if tokens else "show"
+
+        if sub == "load":
+            self._load_env()
+
+        elif sub == "save":
+            if not self.username:
+                print(C_ERROR + "  ✖  No credentials set. Run 'login' first." + RESET); return
+            self._save_env()
+
+        elif sub == "clear":
+            if os.path.isfile(_ENV_FILE):
+                os.remove(_ENV_FILE)
+                print(C_OK + "  ✔  .env file deleted" + RESET)
+            else:
+                print(C_DIM + "  No .env file found." + RESET)
+
+        elif sub == "show":
+            if os.path.isfile(_ENV_FILE):
+                print(C_INFO + "  .env" + RESET + C_DIM + f"  {_ENV_FILE}" + RESET)
+                with open(_ENV_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        key, _, val = line.rstrip().partition("=")
+                        if key.strip() == "RAFFITA_PASS":
+                            print(C_DIM + f"  {key}={'*' * min(len(val), 8)}" + RESET)
+                        else:
+                            print(C_DIM + "  " + line.rstrip() + RESET)
+            else:
+                print(C_DIM + "  No .env file found." + RESET)
+
+        else:
+            print(C_ERROR + f"  ✖  Usage: env load | save | clear | show" + RESET)
 
     # ── Rollback ──────────────────────────────────────────────────────────────
 
@@ -707,10 +1011,18 @@ class RaffitaInterpreter:
         rest = tokens[1:]
 
         if sub == "load":
-            if not rest:
-                print(C_ERROR + "  ✖  Usage: inventory load <file.yaml>" + RESET); return
+            path = rest[0] if rest else _DEFAULT_INVENTORY
             try:
-                self._inventory.load(rest[0])
+                self._inventory.load(path)
+            except (FileNotFoundError, RuntimeError) as exc:
+                print(C_ERROR + f"  ✖  {exc}" + RESET)
+
+        elif sub == "reload":
+            if not self._inventory.is_loaded():
+                print(C_WARN + "  ⚠  No inventory loaded. Use: inventory load [file.yaml]" + RESET)
+                return
+            try:
+                self._inventory.load(self._inventory.loaded_from)
             except (FileNotFoundError, RuntimeError) as exc:
                 print(C_ERROR + f"  ✖  {exc}" + RESET)
 
@@ -752,13 +1064,19 @@ class RaffitaInterpreter:
                 print(C_WARN + "  No tags in inventory." + RESET)
 
         else:
-            print(C_ERROR + f"  ✖  Unknown inventory sub-command '{sub}'. Use: load | show | hosts | groups | tags" + RESET)
+            print(
+                C_ERROR
+                + f"  ✖  Unknown inventory sub-command '{sub}'."
+                + "  Use: load | reload | show | hosts | groups | tags"
+                + RESET
+            )
 
     # ── Toggles / status / objects / help ────────────────────────────────────
 
     def cmd_status(self) -> None:
-        rb_total = sum(self._rollback.depth(h) for h in self.sessions)
-        mode_str = (C_OK + "live" + RESET) if not self.dry_run else (C_DRYRUN + "dry-run" + RESET)
+        rb_total    = sum(self._rollback.depth(h) for h in self.sessions)
+        n_connected = sum(1 for s in self.sessions.values() if s.is_alive())
+        mode_str    = (C_OK + "live" + RESET) if not self.dry_run else (C_DRYRUN + "dry-run" + RESET)
 
         print()
         print(C_INFO + "  Status" + RESET)
@@ -770,7 +1088,15 @@ class RaffitaInterpreter:
         print(f"  Confirm    {'on' if self.confirm else 'off'}")
         print(f"  Parallel   {'on' if self.parallel else 'off'}")
         print(f"  Halt-err   {'on' if self.halt_on_error else 'off'}")
-        print(f"  Sessions   {len(self.sessions)}")
+        if self.sessions:
+            sess_str = (
+                C_OK + str(n_connected) + RESET
+                + "/" + str(len(self.sessions))
+                + C_DIM + " connected" + RESET
+            )
+        else:
+            sess_str = C_DIM + "0" + RESET
+        print(f"  Sessions   {sess_str}")
         if rb_total:
             rb_str = C_ROLLBACK + str(rb_total) + " queued" + RESET
         else:
@@ -778,6 +1104,9 @@ class RaffitaInterpreter:
         print(f"  Rollbacks  {rb_str}")
         inv_str = C_DIM + str(self._inventory.loaded_from or "(not loaded)") + RESET
         print(f"  Inventory  {inv_str}")
+        if self._param_defaults:
+            objs = ", ".join(sorted(self._param_defaults))
+            print(f"  Defaults   {C_DIM}{objs}{RESET}")
         print(f"  Logfile    {C_DIM}{self.logfile}{RESET}")
         print()
 
@@ -826,21 +1155,23 @@ class RaffitaInterpreter:
         def cmd(line: str) -> None:
             parts = line.split("  ", 1)
             if len(parts) == 2:
-                print(f"  {CYAN_1}{parts[0]:<30}{RESET}  {GRAY_9}{parts[1]}{RESET}")
+                print(f"  {CYAN_1}{parts[0]:<32}{RESET}  {GRAY_9}{parts[1]}{RESET}")
             else:
                 print(f"  {CYAN_1}{line}{RESET}")
 
         section("Config")
-        cmd("create <obj> [--PARAM value ...]  build and push config")
-        cmd("stage  <obj> [--PARAM value ...]  write config to staging/<host>.raffita")
-        cmd("deploy [file.raffita ...]         push .raffita files from staging/")
-        cmd("command --CMD \"cmd\" [--HOSTNAME h]  exec-mode commands")
+        cmd("create [--live|--dry] <obj> [--PARAM v]  build and push config")
+        cmd("stage  <obj> [--PARAM value ...]         write config to staging/<host>.raffita")
+        cmd("deploy [--live|--dry] [file.raffita ...]  push .raffita files from staging/")
+        cmd("show   <obj> [--PARAM value ...]         run show commands for an object")
+        cmd("command [--live|--dry] --CMD \"cmd\" ...  exec-mode commands")
 
         section("Session")
         cmd("target <host|@group|@tag:X> ...   set / clear the default target(s)")
         cmd("connect [host|@group|@tag:X] ...  open SSH connection(s)")
         cmd("disconnect [host|@group] ...      close connection(s)")
         cmd("reconnect [host|@group|--all]     reconnect dropped session(s)")
+        cmd("ping [host|@group] ...            TCP:22 reachability check")
         cmd("targets / sessions                list open sessions + rollback depth")
 
         section("Rollback")
@@ -850,8 +1181,18 @@ class RaffitaInterpreter:
         cmd("rollback clear [--all]            clear stack(s)")
 
         section("Inventory")
-        cmd("inventory load <file.yaml>              load host inventory")
+        cmd("inventory load [file.yaml]              load host inventory (default: inventory/inventory.yaml)")
+        cmd("inventory reload                        reload current inventory file")
         cmd("inventory show | hosts | groups | tags  inspect inventory")
+
+        section("Defaults")
+        cmd("set <obj> <PARAM> <value>         set a parameter default for an object")
+        cmd("set [<obj>]                        list current defaults")
+        cmd("unset <obj> [<PARAM>]              remove a default")
+
+        section("Credentials")
+        cmd("login                             set username / password")
+        cmd("env load | save | clear | show    .env file management")
 
         section("Settings")
         cmd("live on|off                       enable / disable live push")
@@ -859,7 +1200,8 @@ class RaffitaInterpreter:
         cmd("confirm on|off                    ask before each push")
         cmd("parallel on|off                   push to all targets concurrently")
         cmd("halt on|off                       stop sequence on first error")
-        cmd("login                             set username / password")
+        cmd("watch <seconds> <command>         repeat a command on an interval")
+        cmd("clear                             clear the terminal")
         cmd("status                            show current settings")
         cmd("objects                           list all object types")
         cmd("help <obj>                        parameters for an object")
@@ -890,6 +1232,8 @@ class RaffitaInterpreter:
             self.cmd_stage(rest)
         elif verb == "deploy":
             self.cmd_deploy(rest)
+        elif verb == "show":
+            self.cmd_show(rest)
         elif verb == "command":
             self.cmd_command(rest)
         elif verb == "target":
@@ -902,6 +1246,18 @@ class RaffitaInterpreter:
             self.cmd_disconnect(rest)
         elif verb in ("targets", "sessions"):
             self.cmd_targets()
+        elif verb == "ping":
+            self.cmd_ping(rest)
+        elif verb == "set":
+            self.cmd_set(rest)
+        elif verb == "unset":
+            self.cmd_unset(rest)
+        elif verb == "watch":
+            self.cmd_watch(rest)
+        elif verb == "env":
+            self.cmd_env(rest)
+        elif verb == "clear":
+            os.system("clear")
         elif verb == "live":
             if not rest or rest[0].lower() not in ("on", "off"):
                 mode = "off" if self.dry_run else "on"
@@ -972,19 +1328,19 @@ class RaffitaInterpreter:
     # ── REPL ──────────────────────────────────────────────────────────────────
 
     def _repl_prompt(self) -> str:
-        w = lambda c: _RL_S + c + _RL_E  # readline-safe ANSI wrapper
+        w = lambda c: _RL_S + c + _RL_E
 
         target_color = GRAY_9
         if self.active_targets:
             resolved = self._resolve_targets()
-            n_alive = sum(
+            n_alive  = sum(
                 1 for h in resolved
                 if h in self.sessions and self.sessions[h].is_alive()
             )
             if resolved and n_alive == len(resolved):
-                target_color = LIGHT_GREEN   # all connected
+                target_color = LIGHT_GREEN
             elif n_alive > 0:
-                target_color = ORANGE        # partially connected
+                target_color = ORANGE
 
         if not HAS_READLINE:
             if self.active_targets:
@@ -1005,6 +1361,13 @@ class RaffitaInterpreter:
 
     def repl(self) -> None:
         self._history.load()
+
+        # Auto-load default inventory if none loaded
+        if not self._inventory.is_loaded() and os.path.isfile(_DEFAULT_INVENTORY):
+            try:
+                self._inventory.load(_DEFAULT_INVENTORY)
+            except Exception:
+                pass
 
         print()
         print(C_OK + "  Raffita ready." + RESET + "  'help' for commands  ·  'exit' to quit")
@@ -1039,7 +1402,7 @@ def make_completer(interp: RaffitaInterpreter):
     obj_names = sorted(OBJECTS)
 
     def _host_choices() -> List[str]:
-        inv = interp._inventory
+        inv     = interp._inventory
         choices = inv.list_hosts()
         choices += ["@" + g for g in inv.list_groups()]
         choices += ["@tag:" + t for t in inv.list_tags()]
@@ -1067,14 +1430,16 @@ def make_completer(interp: RaffitaInterpreter):
             suggestions = [o for o in obj_names if o.startswith(prefix)]
 
         elif idx >= 2 and tokens[0].lower() in OBJ_VERBS:
-            obj = tokens[1].lower()
-            # If previous token is --HOSTNAME, offer inventory hosts
+            obj  = tokens[1].lower()
             prev = tokens[idx - 1] if idx > 0 else ""
             if prev.upper() == "--HOSTNAME":
                 suggestions = [c for c in _host_choices() if c.startswith(prefix)]
             elif obj in OBJECTS and prefix.startswith("--"):
                 flags = ["--" + k for k in OBJECTS[obj]["schema"]]
                 suggestions = [f for f in flags if f.startswith(prefix)]
+
+        elif tokens[0].lower() in ("target", "connect", "reconnect", "disconnect", "ping"):
+            suggestions = [c for c in _host_choices() if c.startswith(prefix)]
 
         elif idx >= 1 and tokens[0].lower() == "command":
             prev = tokens[idx - 1] if idx > 0 else ""
@@ -1088,14 +1453,25 @@ def make_completer(interp: RaffitaInterpreter):
             suggestions = [s for s in subs if s.startswith(prefix)]
 
         elif idx >= 1 and tokens[0].lower() == "inventory":
-            subs = ["load", "show", "hosts", "groups", "tags"]
+            subs = ["load", "reload", "show", "hosts", "groups", "tags"]
             suggestions = [s for s in subs if s.startswith(prefix)]
-
-        elif tokens[0].lower() in ("target", "connect", "reconnect"):
-            suggestions = [c for c in _host_choices() if c.startswith(prefix)]
 
         elif idx == 1 and tokens[0].lower() in ("live", "dryrun", "confirm", "parallel", "halt"):
             suggestions = [s for s in ("on", "off") if s.startswith(prefix)]
+
+        elif idx == 1 and tokens[0].lower() in ("set", "unset"):
+            suggestions = [o for o in obj_names if o.startswith(prefix)]
+
+        elif idx == 2 and tokens[0].lower() in ("set", "unset") and tokens[1].lower() in OBJECTS:
+            obj    = tokens[1].lower()
+            params = list(OBJECTS[obj]["schema"].keys())
+            suggestions = [p for p in params if p.lower().startswith(prefix.lower())]
+
+        elif idx == 1 and tokens[0].lower() == "env":
+            suggestions = [s for s in ("load", "save", "clear", "show") if s.startswith(prefix)]
+
+        elif idx == 2 and tokens[0].lower() == "watch":
+            suggestions = [v for v in VERBS if v.startswith(prefix)]
 
         try:
             return suggestions[state]
@@ -1139,7 +1515,15 @@ def main() -> None:
     os.system("clear")
     print_banner()
     interp = RaffitaInterpreter()
-    interp.login()
+
+    env_loaded = interp._load_env(silent=True)
+    if env_loaded:
+        print(C_OK + f"  ✔  credentials loaded from .env  ({interp.username})" + RESET)
+        print(C_DIM + "  Run 'login' to set different credentials  ·  'env clear' to remove .env" + RESET)
+        print()
+    else:
+        interp.login()
+
     setup_readline(interp)
     interp.repl()
 

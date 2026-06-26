@@ -90,6 +90,16 @@ class SwitchSession:
         if self.conn is not None and self.is_alive():
             return
 
+        # Disconnect stale connection before opening a new one (avoids SSH socket leak)
+        if self.conn is not None:
+            try:
+                self.conn.disconnect()
+            except Exception:
+                pass
+            self.conn = None
+            self.prepared_basic  = False
+            self.prepared_config = False
+
         if not self.preflight():
             raise RuntimeError(
                 f"TCP port 22 unreachable on {self.host} — check IP/firewall."
@@ -306,7 +316,7 @@ class SwitchSession:
                 if y_output:
                     cleaned_y = self._filter_output(y_output)
                     if cleaned_y.strip():
-                        print(C_OUTPUT + self._indent(cleaned_y) + RESET)
+                        self._print_output(cleaned_y)
                     self.logger.info("[%s] OUT: %s", self.host, y_output.strip())
                 collected.append(y_output or "")
 

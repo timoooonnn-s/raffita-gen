@@ -19,7 +19,8 @@ def _validate_field(name: str, value: Any, cfg: dict) -> Optional[str]:
         return None
     try:
         if not validator(value):
-            return cfg.get("validate_msg", f"--{name}: value '{value}' failed validation.")
+            base = cfg.get("validate_msg", "value failed validation")
+            return f"--{name}: '{value}' — {base}"
     except Exception as exc:
         return f"--{name}: validator raised {exc}"
     return None
