@@ -3,7 +3,8 @@
 **raffita** is a Python 3.9+ toolkit for generating, staging, and deploying
 configuration to Extreme VOSS / Fabric Engine switches via SSH.
 It provides an interactive REPL (`raffita_interpreter.py`) with live push,
-parallel group deployment, rollback, host inventory with tags, and session logging.
+parallel group deployment, rollback, host inventory with tags, credential
+management via `.env`, and session logging.
 
 ---
 
@@ -30,8 +31,9 @@ raffita-gen/
 │
 ├── staging/                   # Generated .raffita files land here
 ├── logs/                      # Session logs + per-session summary files
-│
-└── inventory.yaml             # Your host/group/tag inventory (create this yourself)
+├── inventory/
+│   └── inventory.yaml         # Default inventory (auto-loaded at startup)
+└── .env                       # Optional: saved credentials (RAFFITA_USER / RAFFITA_PASS)
 ```
 
 ---
@@ -56,15 +58,16 @@ pip install netmiko jinja2 pyyaml
 python3 raffita_interpreter.py
 ```
 
-The interpreter starts in **dry-run mode** — it builds and previews config but
-sends nothing until you enable live push.
+At startup the interpreter:
+1. Looks for `inventory/inventory.yaml` and loads it automatically if found.
+2. Looks for a `.env` file with saved credentials and skips the login prompt if found.
+3. Starts in **dry-run mode** — builds and previews config but sends nothing until you enable live push.
 
 ```
 raffita> login
   Username: admin
   Password: ****
-
-raffita> inventory load inventory.yaml
+  Save to .env? [y/N]: y       ← saves credentials for next session
 
 raffita> target sw-core-01
 
@@ -79,7 +82,30 @@ raffita> create anycast --VLAN_ID 100 ...
 
 ---
 
+## Credentials & .env
+
+Credentials can be saved to a `.env` file in the project root and auto-loaded on the next startup:
+
+```
+raffita> login          # prompts for username/password, offers to save to .env
+raffita> env save       # save current credentials to .env without re-prompting
+raffita> env load       # load credentials from .env now
+raffita> env show       # display .env contents (password redacted)
+raffita> env clear      # delete the .env file
+```
+
+`.env` format (created automatically by `env save` / `login`):
+```
+RAFFITA_USER=admin
+RAFFITA_PASS=yourpassword
+```
+
+---
+
 ## Inventory File
+
+Place at `inventory/inventory.yaml` to have it loaded automatically at startup,
+or load any file manually with `inventory load <path>`.
 
 ```yaml
 defaults:
@@ -113,14 +139,14 @@ groups:
     - "@access-floor2"
 ```
 
-Load and inspect:
-
 ```
-raffita> inventory load inventory.yaml
-raffita> inventory show          # full summary (hosts, groups, tags)
-raffita> inventory hosts         # list all hosts
-raffita> inventory groups        # list groups with members
-raffita> inventory tags          # list tags with member hosts
+raffita> inventory load                  # loads inventory/inventory.yaml (default)
+raffita> inventory load /path/to/inv.yaml
+raffita> inventory reload                # reload the currently loaded file
+raffita> inventory show                  # full summary (hosts, groups, tags)
+raffita> inventory hosts
+raffita> inventory groups
+raffita> inventory tags
 ```
 
 ### Targeting
@@ -140,7 +166,8 @@ raffita> target none                 # clear target
 When multiple targets are set, `create` and `deploy` iterate over all of them.
 
 Enable parallel push to send to all targets concurrently (SSH in parallel threads,
-output buffered per host and printed in order after all complete):
+output buffered per host, printed in order with a color-coded header per host after
+all complete):
 
 ```
 raffita> parallel on
@@ -148,12 +175,81 @@ raffita> target @core
 raffita> create anycast --VLAN_ID 100 ...
   Push to 2 hosts (sw-core-01, sw-core-02)? [y/N]: y
   ⇶  parallel push → 2 hosts
+  ── sw-core-01 ──────────────────────────────────
+  ...
+  ── sw-core-02 ──────────────────────────────────
+  ...
 ```
 
-Stop on the first error with:
+Stop on the first error:
 
 ```
 raffita> halt on
+```
+
+---
+
+## Per-Command Live / Dry Override
+
+Override the global live/dry-run mode for a single command without changing the setting:
+
+```
+raffita> create --live anycast --VLAN_ID 100 ...   # push live even if dryrun is on
+raffita> deploy --dry staging/sw-core-01.raffita   # preview even if live is on
+raffita> command --dry --CMD show isis spbm        # dry-run a single command
+```
+
+---
+
+## Parameter Defaults (`set`)
+
+Set per-object parameter defaults so you don't have to repeat common values:
+
+```
+raffita> set vlan VRF_NAME PROD
+raffita> set anycast VRF_NAME PROD
+raffita> set anycast ENABLE_DHCP no
+raffita> set                            # list all current defaults
+raffita> set anycast                    # list defaults for one object
+raffita> unset anycast VRF_NAME         # clear one default
+raffita> unset anycast                  # clear all defaults for object
+```
+
+Defaults have lower priority than explicitly provided `--PARAM` values.
+
+---
+
+## Show Commands
+
+Run an object's show commands on the target(s) (dry-run shows what would be sent):
+
+```
+raffita> show vlan --VLAN_ID 100
+raffita> show vrf --VRF_NAME PROD
+```
+
+---
+
+## Reachability Check
+
+Verify TCP port 22 is reachable before committing to a full SSH connect:
+
+```
+raffita> ping                  # ping all active targets
+raffita> ping sw-core-01
+raffita> ping @core
+raffita> ping @tag:access
+```
+
+---
+
+## Watch Mode
+
+Repeat any command on a fixed interval (Ctrl-C to stop):
+
+```
+raffita> watch 30 show vlan --VLAN_ID 100
+raffita> watch 60 command --CMD show virtual-ist
 ```
 
 ---
@@ -177,43 +273,18 @@ The stack is session-scoped (not persisted to disk).
 
 ---
 
-## Pre-Flight Check
-
-Before opening an SSH connection, the toolkit verifies TCP port 22 is reachable.
-If the host is down or firewalled, you get a clear error immediately rather than
-waiting for netmiko's full timeout.
-
----
-
-## Two-Node Staging (cluster)
-
-The `cluster` object generates separate configs for **both** nodes of a vIST pair:
-
-```
-raffita> stage cluster --NICKNAME 7.39.30 --IST_NETWORK 10.34.0.68/30 \
-             --NODENAME1 sw-core-01 --NODENAME2 sw-core-02
-  ✎  staged   → staging/sw-core-01.raffita
-  ✎  staged   → staging/sw-core-02.raffita
-```
-
-Each node gets its own `.raffita` file with the correct IST IPs, nicknames, and
-SMLT peer system-IDs derived automatically from the /30 IST network.
-
----
-
 ## Exec-Mode Commands
 
 Send arbitrary exec-mode (non-config) commands to one or more targets:
 
 ```
-raffita> command --CMD show run
-raffita> command --CMD show isis spbm --HOSTNAME sw-core-01
+raffita> command --CMD "show run"
+raffita> command --CMD "show isis spbm" --HOSTNAME sw-core-01
 raffita> target @core
-raffita> command --CMD show virtual-ist
+raffita> command --CMD "show virtual-ist"
+raffita> parallel on
+raffita> command --CMD "show sys-info"    # runs on all targets concurrently
 ```
-
-Multi-word commands work correctly — everything after `--CMD` until the next
-`--` flag is treated as a single command string.
 
 ---
 
@@ -227,18 +298,22 @@ raffita> targets                    # list sessions + rollback depth + active ma
 raffita> sessions                   # alias for targets
 ```
 
-After every successful config push, the session automatically exits config mode
-(`end`) and saves (`save config` by default, overridable per-host in inventory).
+- Failed connection attempts (typo'd hostname, unreachable host) are automatically
+  cleaned up and not left as dead sessions.
+- Before every SSH connect, TCP port 22 is checked first. If unreachable you get
+  a clear error immediately rather than waiting for netmiko's full timeout.
+- Auto-reconnect retries up to `reconnect_attempts` times (default: 3) with
+  `reconnect_delay` seconds between attempts (default: 5).
+- After every successful config push, the session automatically exits config mode
+  (`end`) and saves (`save config` by default, overridable per-host in inventory).
 
-Auto-reconnect retries up to `reconnect_attempts` times (default: 3) with
-`reconnect_delay` seconds between attempts (default: 5).
+The prompt color indicates connection state when a target is set:
 
----
-
-## Session Summary Log
-
-On exit, a human-readable summary is written to `logs/summary_YYYYMMDD_HHMMSS.log`
-listing every push action with time, host, action type, status, and command count.
+| Color | Meaning |
+|---|---|
+| Green | All resolved hosts connected |
+| Orange | Partially connected |
+| Gray | Not connected |
 
 ---
 
@@ -281,21 +356,33 @@ router isis
 
 | Command | Description |
 |---|---|
-| `create <obj> [--PARAM value ...]` | Build config and push live (or preview in dry-run) |
-| `stage  <obj> [--PARAM value ...]` | Build config and write to `staging/<host>.raffita` |
-| `deploy [file.raffita ...]` | Push `.raffita` files from `staging/` (or named) |
-| `command --CMD "..." [--HOSTNAME h]` | Send arbitrary exec-mode command(s) |
+| `create [--live\|--dry] <obj> [--PARAM v]` | Build config and push (or preview in dry-run) |
+| `stage <obj> [--PARAM value ...]` | Build config and write to `staging/<host>.raffita` |
+| `deploy [--live\|--dry] [file.raffita ...]` | Push `.raffita` files from `staging/` (or named) |
+| `show <obj> [--PARAM value ...]` | Run show commands for an object on active target(s) |
+| `command [--live\|--dry] --CMD "..." [--HOSTNAME h]` | Send arbitrary exec-mode command(s) |
 
 ### Session
 
 | Command | Description |
 |---|---|
 | `target <host\|@group\|@tag:X> ...` | Set default target(s); `none` to clear |
-| `connect [host]` | Open SSH connection |
-| `disconnect [host]` | Close connection(s) |
-| `reconnect [host\|--all]` | Reconnect dropped session(s) |
+| `connect [host\|@group] ...` | Open SSH connection(s) |
+| `disconnect [host\|@group] ...` | Close connection(s) |
+| `reconnect [host\|@group\|--all]` | Reconnect dropped session(s) |
+| `ping [host\|@group] ...` | TCP:22 reachability check |
 | `targets` / `sessions` | List open sessions with rollback depth |
-| `login` | Set username and password |
+| `watch <seconds> <command>` | Repeat a command on an interval (Ctrl-C to stop) |
+
+### Credentials
+
+| Command | Description |
+|---|---|
+| `login` | Set username and password (optionally save to `.env`) |
+| `env load` | Load credentials from `.env` |
+| `env save` | Save current credentials to `.env` |
+| `env clear` | Delete the `.env` file |
+| `env show` | Show `.env` contents (password redacted) |
 
 ### Rollback
 
@@ -311,11 +398,20 @@ router isis
 
 | Command | Description |
 |---|---|
-| `inventory load <file.yaml>` | Load YAML inventory |
+| `inventory load [file.yaml]` | Load YAML inventory (default: `inventory/inventory.yaml`) |
+| `inventory reload` | Reload the currently loaded inventory file |
 | `inventory show` | Print full inventory summary |
 | `inventory hosts` | List all hosts |
 | `inventory groups` | List all groups with members |
 | `inventory tags` | List all tags with member hosts |
+
+### Defaults
+
+| Command | Description |
+|---|---|
+| `set <obj> <PARAM> <value>` | Set a parameter default for an object type |
+| `set [<obj>]` | List current defaults (all, or for one object) |
+| `unset <obj> [<PARAM>]` | Remove a specific default or all defaults for an object |
 
 ### Settings
 
@@ -326,7 +422,8 @@ router isis
 | `confirm on\|off` | Ask before each push (default: on) |
 | `parallel on\|off` | Push to all targets concurrently (default: off) |
 | `halt on\|off` | Stop sequence on first push error (default: off) |
-| `status` | Show current settings |
+| `clear` | Clear the terminal screen |
+| `status` | Show current settings, sessions, and active defaults |
 | `objects` | List all available object types |
 | `help [obj]` | General help or object parameter reference |
 | `exit` / `quit` | Exit (writes session summary to `logs/`) |
@@ -359,17 +456,34 @@ Use `help <obj>` to see all parameters, types, defaults, and validation rules.
 
 ## Parameter Validation
 
-Every schema field with a sensible range carries a `validate` rule checked
-before config is built or sent:
+Every schema field with a sensible range carries a `validate` rule.
+Error messages include the value that was rejected and the valid range:
 
 ```
 raffita> create anycast --VLAN_ID 9999 ...
-  ✖  VLAN_ID must be 1-4094.
+  ✖  [sw-core-01] parameter errors:
+  ✖  --VLAN_ID: '9999' — VLAN_ID must be 1-4094.
 ```
 
 Validated fields include VLAN_ID (1-4094), I_SID (256-16 777 214), VRF_ID (1-511),
 VRRP_ID (1-255), PRIORITY (1-254), ECMP_MAX_PATH (1-8), IP addresses, subnet masks,
 and IST_NETWORK (/30 only).
+
+---
+
+## Two-Node Staging (cluster)
+
+The `cluster` object generates separate configs for **both** nodes of a vIST pair:
+
+```
+raffita> stage cluster --NICKNAME 7.39.30 --IST_NETWORK 10.34.0.68/30 \
+             --NODENAME1 sw-core-01 --NODENAME2 sw-core-02
+  ✎  staged   → staging/sw-core-01.raffita
+  ✎  staged   → staging/sw-core-02.raffita
+```
+
+Each node gets its own `.raffita` file with the correct IST IPs, nicknames, and
+SMLT peer system-IDs derived automatically from the /30 IST network.
 
 ---
 
