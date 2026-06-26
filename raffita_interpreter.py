@@ -1473,6 +1473,7 @@ class RaffitaInterpreter:
             self.cmd_env(rest)
         elif verb == "clear":
             os.system("clear")
+            self._print_status_header()
         elif verb == "live":
             if not rest or rest[0].lower() not in ("on", "off"):
                 mode = "off" if self.dry_run else "on"
@@ -1542,6 +1543,23 @@ class RaffitaInterpreter:
 
     # ── REPL ──────────────────────────────────────────────────────────────────
 
+    def _print_status_header(self) -> None:
+        rb_total    = sum(self._rollback.depth(h) for h in self.sessions)
+        n_connected = sum(1 for s in self.sessions.values() if s.is_alive())
+
+        mode   = (C_WARN + "LIVE" + RESET) if not self.dry_run else (C_DIM + "DRY" + RESET)
+        target = (C_HOST + ", ".join(self.active_targets) + RESET) if self.active_targets \
+                 else C_DIM + "none" + RESET
+        sess   = (C_OK + str(n_connected) + RESET + C_DIM + f"/{len(self.sessions)} open" + RESET) \
+                 if self.sessions else C_DIM + "—" + RESET
+        rb     = (C_ROLLBACK + f"{rb_total} queued" + RESET) if rb_total else C_DIM + "—" + RESET
+
+        print()
+        print(C_DIVIDER + "  " + "─" * 62 + RESET)
+        print(f"  mode:{mode}  target:{target}  sessions:{sess}  rollbacks:{rb}")
+        print(C_DIVIDER + "  " + "─" * 62 + RESET)
+        print()
+
     def _repl_prompt(self) -> str:
         w = lambda c: _RL_S + c + _RL_E
 
@@ -1557,22 +1575,35 @@ class RaffitaInterpreter:
             elif n_alive > 0:
                 target_color = C_WARN
 
+        rb_total   = sum(self._rollback.depth(h) for h in self.sessions)
+        mode_color = C_WARN if not self.dry_run else C_DIM
+        mode_label = "LIVE" if not self.dry_run else "DRY"
+
         if not HAS_READLINE:
+            rb_part  = f" +{rb_total}↩" if rb_total else ""
             if self.active_targets:
-                return f"raffita({','.join(self.active_targets)})> "
-            return "raffita> "
+                return f"raffita({','.join(self.active_targets)}{rb_part})[{mode_label}]> "
+            return f"raffita[{mode_label}]> "
+
+        rb_part = (w(C_ROLLBACK) + f" +{rb_total}↩" + w(RESET)) if rb_total else ""
 
         if self.active_targets:
             label = ",".join(self.active_targets)
             return (
                 w(C_PARAM) + "raffita"
                 + w(C_SECTION) + "("
-                + w(target_color) + label
+                + w(target_color) + label + rb_part
                 + w(C_SECTION) + ")"
+                + w(mode_color) + f"[{mode_label}]"
                 + w(C_PARAM) + "> "
                 + w(RESET)
             )
-        return w(C_PARAM) + "raffita> " + w(RESET)
+        return (
+            w(C_PARAM) + "raffita"
+            + w(mode_color) + f"[{mode_label}]"
+            + w(C_PARAM) + "> "
+            + w(RESET)
+        )
 
     def repl(self) -> None:
         self._history.load()
@@ -1649,7 +1680,7 @@ def make_completer(interp: RaffitaInterpreter):
             prev = tokens[idx - 1] if idx > 0 else ""
             if prev.upper() == "--HOSTNAME":
                 suggestions = [c for c in _host_choices() if c.startswith(prefix)]
-            elif obj in OBJECTS and prefix.startswith("--"):
+            elif obj in OBJECTS and (not prefix or prefix.startswith("--")):
                 flags = ["--" + k for k in OBJECTS[obj]["schema"]]
                 suggestions = [f for f in flags if f.startswith(prefix)]
 
@@ -1695,11 +1726,76 @@ def make_completer(interp: RaffitaInterpreter):
             suggestions = [v for v in VERBS if v.startswith(prefix)]
 
         try:
-            return suggestions[state]
+            s = suggestions[state]
+            if len(suggestions) == 1:
+                s += " "
+            return s
         except IndexError:
             return None
 
     return completer
+
+
+def make_display_hook(interp: RaffitaInterpreter):
+    def display_matches(substitution: str, matches: List[str], longest: int) -> None:
+        buffer = readline.get_line_buffer() if HAS_READLINE else ""
+        try:
+            toks = shlex.split(buffer)
+        except ValueError:
+            toks = buffer.split()
+
+        print()  # break from the current prompt line
+
+        # Parameter completion for an object verb — group by required / optional
+        if (len(toks) >= 2
+                and toks[0].lower() in OBJ_VERBS
+                and all(m.startswith("--") for m in matches)):
+            obj = toks[1].lower()
+            if obj in OBJECTS:
+                schema = OBJECTS[obj]["schema"]
+                required: List[str] = []
+                optional: List[str] = []
+                for m in matches:
+                    name = m[2:]
+                    if schema.get(name, {}).get("required"):
+                        required.append(m)
+                    else:
+                        optional.append(m)
+
+                if required:
+                    print(C_ERROR + "  required:" + RESET)
+                    for p in required:
+                        name     = p[2:]
+                        help_txt = schema.get(name, {}).get("help", "")
+                        print(f"    {C_ERROR}{p:<28}{RESET}  {C_DIM}{help_txt}{RESET}")
+                if optional:
+                    if required:
+                        print()
+                    print(C_SECTION + "  optional:" + RESET)
+                    for p in optional:
+                        name     = p[2:]
+                        cfg      = schema.get(name, {})
+                        help_txt = cfg.get("help", "")
+                        default  = cfg.get("default")
+                        extra    = f"  [{default}]" if default is not None else ""
+                        print(f"    {C_DIM}{p:<28}{RESET}  {C_DIM}{help_txt}{extra}{RESET}")
+                print()
+                return
+
+        # Default: simple columnar display
+        try:
+            term_w = os.get_terminal_size().columns
+        except Exception:
+            term_w = 80
+        col_w = min(longest + 2, term_w)
+        cols  = max(1, term_w // col_w)
+        for i, m in enumerate(matches):
+            print(f"  {m:<{col_w}}", end="\n" if (i + 1) % cols == 0 else "")
+        if matches and len(matches) % cols != 0:
+            print()
+        print()
+
+    return display_matches
 
 
 def setup_readline(interp: RaffitaInterpreter) -> None:
@@ -1714,6 +1810,10 @@ def setup_readline(interp: RaffitaInterpreter) -> None:
     except Exception:
         pass
     readline.set_completer(make_completer(interp))
+    try:
+        readline.set_completion_display_matches_hook(make_display_hook(interp))
+    except AttributeError:
+        pass
 
 
 # ── Banner / entry point ──────────────────────────────────────────────────────
