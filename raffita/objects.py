@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Central registry of all network object types for the Raffita toolkit.
 #
-# Each entry in OBJECTS provides: schema, build, delete, show.
+# Each entry in OBJECTS provides: schema, build.
 # Validation ranges are co-located with each schema field.
 
 from .gen_lib import render_template, generate_vlan_name
@@ -498,192 +498,67 @@ def build_cluster(p):
     return [(p["NODENAME1"], cfg1), (p["NODENAME2"], cfg2)]
 
 
-# ── Delete commands ───────────────────────────────────────────────────────────
-
-_CONF_HDR = "enable\nconf t\nterm more disable\n"
-
-def delete_vlan(p):
-    return _CONF_HDR + f"vlan delete {p['VLAN_ID']}\n"
-
-def delete_rsmlt(p):
-    return (
-        _CONF_HDR
-        + f"no slpp vid {p['VLAN_ID']}\n"
-        + f"vlan delete {p['VLAN_ID']}\n"
-        + f"no i-sid {p['I_SID']}\n"
-    )
-
-def delete_loopback(p):
-    return _CONF_HDR + f"no interface loopback {p['LOOPBACK_INT_ID']}\n"
-
-def delete_mlt(p):
-    out = _CONF_HDR + f"no mlt {p['MLT_ID']}\n"
-    if p.get("INTERFACE"):
-        out += f"default interface gigabitEthernet {p['INTERFACE']}\n"
-    return out
-
-def delete_isid(p):
-    return _CONF_HDR + f"no i-sid {p['I_SID']}\n"
-
-def delete_port(p):
-    return _CONF_HDR + f"default interface gigabitEthernet {p['INTERFACE']}\n"
-
-def delete_route(p):
-    return (
-        _CONF_HDR
-        + f"router vrf {p['VRF_NAME']}\n"
-        + f"  no ip route {p['IP_ADDRESS']} {p['SUBNET_MASK']} {p['NEXT_HOP']}\n"
-        + "exit\n"
-    )
-
-def delete_vrf(p):
-    return _CONF_HDR + f"no ip vrf {p['VRF_NAME']}\n"
-
-
-# ── Show commands ─────────────────────────────────────────────────────────────
-
-def show_vlan_l3(opts):
-    vid = opts.get("VLAN_ID")
-    return ([f"show vlan basic {vid}", "show interface vlan ip"]
-            if vid else ["show vlan i-sid", "show interface vlan ip"])
-
-def show_vrrp(opts):
-    vid = opts.get("VLAN_ID")
-    return ([f"show ip vrrp interface vlan {vid}", f"show vlan basic {vid}"]
-            if vid else ["show ip vrrp", "show vlan i-sid"])
-
-def show_loopback(opts):
-    vrf = opts.get("VRF_NAME")
-    return ([f"show ip interface vrf {vrf}"]
-            if vrf else ["show interface loopback", "show ip interface"])
-
-def show_mlt(opts):
-    mid = opts.get("MLT_ID")
-    return [f"show mlt {mid}"] if mid else ["show mlt"]
-
-def show_isid(opts):
-    isid = opts.get("I_SID")
-    return [f"show i-sid {isid}"] if isid else ["show i-sid"]
-
-def show_port(opts):
-    intf = opts.get("INTERFACE")
-    return ([f"show interfaces gigabitEthernet interface {intf}"]
-            if intf else ["show interfaces gigabitEthernet"])
-
-def show_route(opts):
-    vrf = opts.get("VRF_NAME")
-    return [f"show ip route vrf {vrf}"] if vrf else ["show ip route"]
-
-def show_vrf(opts):
-    vrf = opts.get("VRF_NAME")
-    return [f"show ip vrf {vrf}"] if vrf else ["show ip vrf"]
-
-def show_cluster(_opts):
-    return ["show virtual-ist", "show smlt", "show isis spbm"]
-
-def show_ntp(_opts):
-    return ["show ntp", "show ntp status"]
-
-def show_snmp(_opts):
-    return ["show snmp-server community", "show snmp-server host"]
-
-def show_spbm(_opts):
-    return ["show isis spbm", "show isis adjacency", "show isis lsdb"]
-
-
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 OBJECTS = {
     "anycast": {
         "desc": "Anycast-Gateway (one-ip) L3 VLAN interface",
         "schema": SCHEMA_ANYCAST, "build": build_anycast,
-        "delete": delete_vlan,    "delete_params": ["VLAN_ID", "HOSTNAME"],
-        "show": show_vlan_l3,     "show_params":   ["VLAN_ID"],
     },
     "dvr": {
         "desc": "DVR one-IP gateway L3 VLAN interface",
-        "schema": SCHEMA_DVR,  "build": build_dvr,
-        "delete": delete_vlan, "delete_params": ["VLAN_ID", "HOSTNAME"],
-        "show": show_vlan_l3,  "show_params":   ["VLAN_ID"],
+        "schema": SCHEMA_DVR, "build": build_dvr,
     },
     "rsmlt": {
         "desc": "RSMLT L3 VLAN interface",
         "schema": SCHEMA_RSMLT, "build": build_rsmlt,
-        "delete": delete_rsmlt, "delete_params": ["VLAN_ID", "I_SID", "HOSTNAME"],
-        "show": show_vlan_l3,   "show_params":   ["VLAN_ID"],
     },
     "vrrp": {
         "desc": "VRRP L3 VLAN interface",
         "schema": SCHEMA_VRRP, "build": build_vrrp,
-        "delete": delete_vlan, "delete_params": ["VLAN_ID", "HOSTNAME"],
-        "show": show_vrrp,     "show_params":   ["VLAN_ID"],
     },
     "loopback": {
         "desc": "Circuitless IP / loopback interface",
         "schema": SCHEMA_LOOPBACK, "build": build_loopback,
-        "delete": delete_loopback, "delete_params": ["LOOPBACK_INT_ID", "HOSTNAME"],
-        "show": show_loopback,     "show_params":   ["VRF_NAME"],
     },
     "mlt": {
         "desc": "MultiLink Trunk + interface",
         "schema": SCHEMA_MLT, "build": build_mlt,
-        "delete": delete_mlt, "delete_params": ["MLT_ID", "INTERFACE", "HOSTNAME"],
-        "delete_optional": ["INTERFACE"],
-        "show": show_mlt,     "show_params":   ["MLT_ID"],
     },
     "port": {
         "desc": "Single interface",
         "schema": SCHEMA_PORT, "build": build_port,
-        "delete": delete_port, "delete_params": ["INTERFACE", "HOSTNAME"],
-        "show": show_port,     "show_params":   ["INTERFACE"],
     },
     "isid": {
         "desc": "I-SID on port/MLT (L2 service)",
         "schema": SCHEMA_ISID, "build": build_isid,
-        "delete": delete_isid, "delete_params": ["I_SID", "HOSTNAME"],
-        "show": show_isid,     "show_params":   ["I_SID"],
     },
     "route": {
         "desc": "Static route in VRF",
         "schema": SCHEMA_ROUTE, "build": build_route,
-        "delete": delete_route,
-        "delete_params": ["VRF_NAME", "IP_ADDRESS", "SUBNET_MASK", "NEXT_HOP", "HOSTNAME"],
-        "show": show_route, "show_params": ["VRF_NAME"],
     },
     "vrf": {
         "desc": "VRF with IPVPN",
         "schema": SCHEMA_VRF, "build": build_vrf,
-        "delete": delete_vrf, "delete_params": ["VRF_NAME", "HOSTNAME"],
-        "show": show_vrf,     "show_params":   ["VRF_NAME"],
     },
     "vrf_multiarea": {
         "desc": "VRF multi-area redistribution",
         "schema": SCHEMA_VRF_MULTIAREA, "build": build_vrf_multiarea,
-        "delete": delete_vrf,           "delete_params": ["VRF_NAME", "HOSTNAME"],
-        "show": show_vrf,               "show_params":   ["VRF_NAME"],
     },
     "cluster": {
         "desc": "vIST cluster (generates config for two nodes)",
         "schema": SCHEMA_CLUSTER, "build": build_cluster, "multi_host": True,
-        "delete": None,           "delete_params": [],
-        "show": show_cluster,     "show_params":   [],
     },
     "ntp": {
         "desc": "NTP server configuration",
         "schema": SCHEMA_NTP, "build": build_ntp,
-        "delete": None,       "delete_params": ["NTP_SERVER", "HOSTNAME"],
-        "show": show_ntp,     "show_params":   [],
     },
     "snmp": {
         "desc": "SNMP community / trap configuration",
         "schema": SCHEMA_SNMP, "build": build_snmp,
-        "delete": None,        "delete_params": ["HOSTNAME"],
-        "show": show_snmp,     "show_params":   [],
     },
     "spbm": {
         "desc": "Basic IS-IS / SPBM node configuration",
         "schema": SCHEMA_SPBM, "build": build_spbm,
-        "delete": None,        "delete_params": ["HOSTNAME"],
-        "show": show_spbm,     "show_params":   [],
     },
 }

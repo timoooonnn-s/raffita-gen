@@ -6,7 +6,7 @@ import os as _os
 import re
 import socket
 import time
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from .colors import (
     C_CMD, C_OUTPUT, C_PREP, C_DIM, C_OK, C_WARN, C_ERROR, C_DRYRUN,
@@ -331,23 +331,6 @@ class SwitchSession:
             self._exit_config_and_save()
 
         return "\n".join(collected)
-
-    def send_show(self, commands: List[str]) -> Dict[str, str]:
-        """Run exec-mode show commands and return {command: output}."""
-        self.ensure_alive()
-        self._prepare_basic()
-
-        results: Dict[str, str] = {}
-        for cmd in commands:
-            self.logger.info("[%s] SHOW: %s", self.host, cmd)
-            try:
-                output = self._send_one(cmd, exec_mode=True)
-                results[cmd] = output or ""
-                self.logger.info("[%s] SHOW OUT: %s", self.host, (output or "").strip())
-            except Exception as exc:
-                self.logger.error("[%s] SHOW '%s' failed: %s", self.host, cmd, exc)
-                results[cmd] = f"ERROR: {exc}"
-        return results
 
     # ── Output helpers ────────────────────────────────────────────────────────
 
