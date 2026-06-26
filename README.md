@@ -151,13 +151,19 @@ raffita> inventory tags
 
 ### Targeting
 
+No inventory is needed for ad-hoc targeting — bare hostnames always work:
+
 ```
-raffita> target sw-core-01           # single host
-raffita> target @core                # group → sw-core-01, sw-core-02
-raffita> target @tag:access          # all hosts tagged "access"
-raffita> target sw-core-01 sw-acc-21 # explicit multi-host
-raffita> target none                 # clear target
+raffita> target sw-core-01                     # single host
+raffita> target sw-core-01 sw-core-02          # multiple hosts, no inventory needed
+raffita> target sw-core-01 sw-core-02 @edge    # mix bare hosts with a group
+raffita> target @core                          # inventory group → sw-core-01, sw-core-02
+raffita> target @tag:access                    # all hosts tagged "access"
+raffita> target none                           # clear target
 ```
+
+All subsequent commands (`create`, `show`, `stage`, `ping`, `command`) automatically
+run against every host in the current target set.
 
 ---
 
@@ -233,7 +239,7 @@ raffita> show spbm                       # IS-IS/SPBM status
 raffita> show loopback --VRF_NAME PROD   # loopbacks in a VRF
 ```
 
-Use `help show` to list all objects with show commands.  
+Use `man show` to see usage and all objects with show commands.  
 Use `help <obj>` to see all parameters an object accepts.
 
 ---
@@ -310,16 +316,18 @@ raffita> command --CMD "show sys-info"    # runs on all targets concurrently
 ## Session / Connection Management
 
 ```
-raffita> connect sw-core-01         # connect + set as active target
-raffita> connect @core              # connect a whole group + set as target
-raffita> disconnect sw-core-01      # close one session
-raffita> disconnect all             # close all sessions
-raffita> reconnect [host|--all]     # reconnect dropped session(s)
-raffita> targets                    # list sessions + rollback depth + active marker
-raffita> sessions                   # alias for targets
+raffita> connect sw-core-01                  # connect + set as active target
+raffita> connect sw-core-01 sw-core-02       # multiple hosts, no inventory needed
+raffita> connect @core                       # connect a whole group + set as target
+raffita> disconnect sw-core-01               # close one session
+raffita> disconnect all                      # close all sessions
+raffita> reconnect [host|--all]              # reconnect dropped session(s)
+raffita> targets                             # list sessions + rollback depth + active marker
+raffita> sessions                            # alias for targets
 ```
 
-- `connect <host|@group>` automatically sets the connected host(s) as the active target.
+- `connect` sets all connected hosts as the active target automatically.
+- Multiple bare hostnames work without an inventory — `connect sw-core-01 sw-core-02`.
 - Failed connection attempts are cleaned up immediately — no dead sessions left open.
 - Ctrl-C during a slow or hanging connect aborts that one connection without exiting the REPL.
 - Before every SSH connect, TCP port 22 is checked first for a fast failure on unreachable hosts.
@@ -328,13 +336,28 @@ raffita> sessions                   # alias for targets
 - After every successful config push, the session automatically exits config mode
   (`end`) and saves (`save config` by default, overridable per-host in inventory).
 
-The prompt color indicates connection state when a target is set:
+### Prompt indicators
 
-| Color | Meaning |
+The prompt reflects live session state at a glance:
+
+```
+raffita[DRY]>                           # no target, dry-run mode
+raffita(sw-core-01)[LIVE]>              # target set, live mode
+raffita(sw-core-01 +2↩)[LIVE]>         # 2 rollbacks queued on active host
+raffita(@core)[DRY]>                    # group target, dry-run
+```
+
+| Prompt part | Meaning |
 |---|---|
-| Green | All resolved hosts connected |
-| Orange | Partially connected |
-| Gray | Not connected |
+| `[LIVE]` (orange) | Live push enabled — commands will be sent to switches |
+| `[DRY]` (dim) | Dry-run mode — config is previewed but nothing is sent |
+| `+N↩` | N rollback entries queued on the active session host(s) |
+| Target color: green | All resolved hosts are connected |
+| Target color: orange | Partially connected |
+| Target color: gray | Not connected |
+
+Running `clear` reprints a compact status bar at the top of the fresh screen so you
+always know your mode, target, and open sessions after clearing.
 
 ---
 
@@ -387,8 +410,8 @@ router isis
 
 | Command | Description |
 |---|---|
-| `target <host\|@group\|@tag:X> ...` | Set default target(s); `none` to clear |
-| `connect [host\|@group] ...` | Open SSH connection(s) and set as active target |
+| `target <host> [host ...] [@group]` | Set default target(s); bare hostnames work without inventory; `none` to clear |
+| `connect [host] [host ...] [@group]` | Open SSH connection(s) and set as active target |
 | `disconnect [host\|@group\|all] ...` | Close connection(s); `all` closes every session |
 | `reconnect [host\|@group\|--all]` | Reconnect dropped session(s) |
 | `ping [host\|@group] ...` | TCP:22 reachability check |
@@ -443,10 +466,11 @@ router isis
 | `confirm on\|off` | Ask before each push (default: on) |
 | `parallel on\|off` | Push to all targets concurrently (default: off) |
 | `halt on\|off` | Stop sequence on first push error (default: off) |
-| `clear` | Clear the terminal screen |
+| `clear` | Clear screen and reprint compact status bar |
 | `status` | Show current settings, sessions, and active defaults |
 | `objects` | List all available object types |
-| `help [verb\|obj]` | General help, verb-specific usage, or object parameter reference |
+| `man <verb>` | Detailed usage notes and examples for a command |
+| `help <obj>` | Parameter reference for an object type |
 | `exit` / `quit` | Exit (writes session summary to `logs/`) |
 
 ---
@@ -518,6 +542,25 @@ SMLT peer system-IDs derived automatically from the /30 IST network.
 6. Create the matching Jinja2 template at `templates/<name>_template.j2`.
 
 No changes needed in the interpreter — it reads everything from `OBJECTS`.
+
+---
+
+## Tab Completion
+
+The REPL has context-aware tab completion throughout:
+
+- **Verbs** — Tab on an empty line completes command names
+- **Object names** — `create <Tab>` lists all object types
+- **Parameters** — `create vrf <Tab>` or `create vrf --<Tab>` lists all `--PARAM` flags;
+  double-Tab shows them grouped by **required** and **optional** with help text and defaults
+- **Hosts** — `target <Tab>`, `connect <Tab>`, `ping <Tab>` suggest inventory hosts,
+  groups, tags, and any currently open sessions (even without an inventory loaded);
+  hosts already on the line are excluded from suggestions
+- **Subcommands** — `rollback <Tab>`, `inventory <Tab>`, `env <Tab>` complete sub-commands
+- **`man <Tab>`** — completes verb names for manpages
+- **`help <Tab>`** — completes object type names
+
+A unique match inserts with a trailing space so you can keep typing immediately.
 
 ---
 
