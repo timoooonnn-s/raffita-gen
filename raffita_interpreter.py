@@ -1744,7 +1744,7 @@ def make_display_hook(interp: RaffitaInterpreter):
         except ValueError:
             toks = buffer.split()
 
-        print()  # break from the current prompt line
+        # readline already called rl_crlf() before invoking us — no leading newline needed
 
         # Parameter completion for an object verb — group by required / optional
         if (len(toks) >= 2
