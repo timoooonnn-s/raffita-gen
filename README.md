@@ -221,12 +221,20 @@ Defaults have lower priority than explicitly provided `--PARAM` values.
 
 ## Show Commands
 
-Run an object's show commands on the target(s) (dry-run shows what would be sent):
+Run an object's show commands on the target(s) (dry-run shows what would be sent).
+All parameters are optional — omitting them shows all instances.
 
 ```
-raffita> show vlan --VLAN_ID 100
-raffita> show vrf --VRF_NAME PROD
+raffita> show vrf                        # all VRFs on target
+raffita> show vrf --VRF_NAME PROD        # specific VRF
+raffita> show anycast --VLAN_ID 100      # specific VLAN
+raffita> show mlt                        # all MLTs
+raffita> show spbm                       # IS-IS/SPBM status
+raffita> show loopback --VRF_NAME PROD   # loopbacks in a VRF
 ```
+
+Use `help show` to list all objects with show commands.  
+Use `help <obj>` to see all parameters an object accepts.
 
 ---
 
@@ -248,7 +256,7 @@ raffita> ping @tag:access
 Repeat any command on a fixed interval:
 
 ```
-raffita> watch 30 show vlan --VLAN_ID 100
+raffita> watch 30 show vrf
 raffita> watch 60 command --CMD show virtual-ist
 ```
 
@@ -302,17 +310,19 @@ raffita> command --CMD "show sys-info"    # runs on all targets concurrently
 ## Session / Connection Management
 
 ```
-raffita> connect [host]             # open SSH connection
-raffita> disconnect [host]          # close connection(s)
+raffita> connect sw-core-01         # connect + set as active target
+raffita> connect @core              # connect a whole group + set as target
+raffita> disconnect sw-core-01      # close one session
+raffita> disconnect all             # close all sessions
 raffita> reconnect [host|--all]     # reconnect dropped session(s)
 raffita> targets                    # list sessions + rollback depth + active marker
 raffita> sessions                   # alias for targets
 ```
 
-- Failed connection attempts (typo'd hostname, unreachable host) are automatically
-  cleaned up and not left as dead sessions.
-- Before every SSH connect, TCP port 22 is checked first. If unreachable you get
-  a clear error immediately rather than waiting for netmiko's full timeout.
+- `connect <host|@group>` automatically sets the connected host(s) as the active target.
+- Failed connection attempts are cleaned up immediately — no dead sessions left open.
+- Ctrl-C during a slow or hanging connect aborts that one connection without exiting the REPL.
+- Before every SSH connect, TCP port 22 is checked first for a fast failure on unreachable hosts.
 - Auto-reconnect retries up to `reconnect_attempts` times (default: 3) with
   `reconnect_delay` seconds between attempts (default: 5).
 - After every successful config push, the session automatically exits config mode
@@ -370,7 +380,7 @@ router isis
 | `create [--live\|--dry] <obj> [--PARAM v]` | Build config and push (or preview in dry-run) |
 | `stage <obj> [--PARAM value ...]` | Build config and write to `staging/<host>.raffita` |
 | `deploy [--live\|--dry] [file.raffita ...]` | Push `.raffita` files from `staging/` (or named) |
-| `show <obj> [--PARAM value ...]` | Run show commands for an object on active target(s) |
+| `show <obj> [--PARAM value ...]` | Run show commands for an object (all params optional) |
 | `command [--live\|--dry] --CMD "..." [--HOSTNAME h]` | Send arbitrary exec-mode command(s) |
 
 ### Session
@@ -378,8 +388,8 @@ router isis
 | Command | Description |
 |---|---|
 | `target <host\|@group\|@tag:X> ...` | Set default target(s); `none` to clear |
-| `connect [host\|@group] ...` | Open SSH connection(s) |
-| `disconnect [host\|@group] ...` | Close connection(s) |
+| `connect [host\|@group] ...` | Open SSH connection(s) and set as active target |
+| `disconnect [host\|@group\|all] ...` | Close connection(s); `all` closes every session |
 | `reconnect [host\|@group\|--all]` | Reconnect dropped session(s) |
 | `ping [host\|@group] ...` | TCP:22 reachability check |
 | `targets` / `sessions` | List open sessions with rollback depth |
@@ -436,7 +446,7 @@ router isis
 | `clear` | Clear the terminal screen |
 | `status` | Show current settings, sessions, and active defaults |
 | `objects` | List all available object types |
-| `help [obj]` | General help or object parameter reference |
+| `help [verb\|obj]` | General help, verb-specific usage, or object parameter reference |
 | `exit` / `quit` | Exit (writes session summary to `logs/`) |
 
 ---

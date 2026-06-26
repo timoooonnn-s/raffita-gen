@@ -48,6 +48,30 @@ VERBS = [
 
 OBJ_VERBS = ("create", "stage", "show")
 
+_VERB_HELP: Dict[str, str] = {
+    "show":       "show <obj> [--PARAM value ...]",
+    "create":     "create [--live|--dry] <obj> [--PARAM value ...]",
+    "stage":      "stage <obj> [--PARAM value ...]",
+    "deploy":     "deploy [--live|--dry] [file.raffita ...]",
+    "command":    "command [--live|--dry] --CMD \"...\" [--HOSTNAME h]",
+    "target":     "target <host|@group|@tag:X> ...  |  target none",
+    "connect":    "connect [host|@group|@tag:X] ...",
+    "disconnect": "disconnect [host|@group|all] ...",
+    "reconnect":  "reconnect [host|@group|--all]",
+    "ping":       "ping [host|@group|@tag:X] ...",
+    "rollback":   "rollback [last|all|list|prestate|clear [--all]]",
+    "inventory":  "inventory load|reload|show|hosts|groups|tags [path]",
+    "set":        "set <obj> <PARAM> <value>  |  set [<obj>]",
+    "unset":      "unset <obj> [<PARAM>]",
+    "watch":      "watch <seconds> <command>",
+    "env":        "env load|save|clear|show",
+    "live":       "live on|off",
+    "dryrun":     "dryrun on|off",
+    "confirm":    "confirm on|off",
+    "parallel":   "parallel on|off",
+    "halt":       "halt on|off",
+}
+
 _DIV = "─" * 56
 
 _RL_S = "\001"
@@ -387,6 +411,12 @@ class RaffitaInterpreter:
             print(C_PREP + f"  ·  [{host}]  connecting …" + RESET)
             try:
                 session.connect()
+            except KeyboardInterrupt:
+                print()
+                print(C_WARN + f"  ⊘  connection to {host} interrupted" + RESET)
+                self.sessions.pop(host, None)
+                self._log_action(host, action, "error", cmd_count)
+                return False
             except Exception as exc:
                 print(C_ERROR + f"  ✖  Cannot connect to {host}: {exc}" + RESET)
                 self.logger.error("AUTO-CONNECT failed host=%s: %s", host, exc)
@@ -599,12 +629,45 @@ class RaffitaInterpreter:
         if not spec.get("show"):
             print(C_WARN + f"  ⚠  '{obj}' has no show commands defined." + RESET); return
 
-        configs = self._build_configs(obj, opts)
-        if not configs:
+        # Resolve hosts — show doesn't need full schema validation (all params optional)
+        norm_opts = {k.upper(): v for k, v in opts.items()}
+        explicit  = norm_opts.get("HOSTNAME")
+        if explicit:
+            hosts = (
+                self._resolve_targets([str(explicit)])
+                if str(explicit).startswith("@")
+                else [str(explicit)]
+            )
+        elif self.active_targets:
+            hosts = self._resolve_targets()
+        else:
+            print(C_ERROR + "  ✖  No target. Set --HOSTNAME or use 'target <host>'." + RESET)
             return
 
-        for host, _cfg, params in configs:
-            show_cmds = spec["show"](params)
+        if not hosts:
+            return
+
+        for host in hosts:
+            # Build params by type-coercing whatever was provided; missing fields → None/default
+            show_params: Dict[str, Any] = {"HOSTNAME": host}
+            for name, cfg in spec["schema"].items():
+                raw = norm_opts.get(name.upper())
+                if raw is None or raw is True:
+                    show_params[name] = cfg.get("default")
+                else:
+                    t = cfg.get("type", str)
+                    if t is list:
+                        show_params[name] = raw if isinstance(raw, list) else [raw]
+                    elif t is bool:
+                        from raffita.param_filling import str_to_bool
+                        show_params[name] = raw if isinstance(raw, bool) else str_to_bool(raw)
+                    else:
+                        try:
+                            show_params[name] = t(raw)
+                        except (ValueError, TypeError):
+                            show_params[name] = raw
+
+            show_cmds = spec["show"](show_params)
             print()
             print(C_HOST + f"  ▶  {host}" + RESET + "  " + BOLD + WHITE + f"show {obj}" + RESET)
 
@@ -623,6 +686,11 @@ class RaffitaInterpreter:
                 print(C_PREP + f"  ·  [{host}]  connecting …" + RESET)
                 try:
                     session.connect()
+                except KeyboardInterrupt:
+                    print()
+                    print(C_WARN + f"  ⊘  connection to {host} interrupted" + RESET)
+                    self.sessions.pop(host, None)
+                    return
                 except Exception as exc:
                     print(C_ERROR + f"  ✖  Cannot connect to {host}: {exc}" + RESET)
                     self.logger.error("AUTO-CONNECT failed host=%s: %s", host, exc)
@@ -727,6 +795,7 @@ class RaffitaInterpreter:
     def cmd_connect(self, tokens: List[str]) -> None:
         if not self._have_login():
             print(C_ERROR + "  ✖  Run 'login' first." + RESET); return
+        explicit_refs = list(tokens) if tokens else None
         if tokens:
             hosts = self._resolve_targets(tokens)
         elif self.active_targets:
@@ -735,14 +804,30 @@ class RaffitaInterpreter:
             print(C_ERROR + "  ✖  No host specified and no target set." + RESET); return
         if not hosts:
             print(C_WARN + "  ⚠  No hosts resolved." + RESET); return
+        connected_any = False
         for host in hosts:
             sess = self._get_session(host)
             try:
                 sess.connect()
                 print(C_OK + f"  ✔  connected to {host}" + RESET)
+                connected_any = True
+            except KeyboardInterrupt:
+                print()
+                print(C_WARN + f"  ⊘  connection to {host} interrupted" + RESET)
+                self.sessions.pop(host, None)
+                break
             except Exception as exc:
                 print(C_ERROR + f"  ✖  Connection to {host} failed: {exc}" + RESET)
                 self.sessions.pop(host, None)
+        if explicit_refs and connected_any:
+            self.active_targets = explicit_refs
+            resolved = self._resolve_targets()
+            hosts_str = ", ".join(resolved)
+            refs_str  = ", ".join(explicit_refs)
+            if hosts_str == refs_str:
+                print(C_HOST + f"  ✔  target: {refs_str}" + RESET)
+            else:
+                print(C_HOST + f"  ✔  target: {refs_str}" + RESET + C_DIM + f"  → {hosts_str}" + RESET)
 
     def cmd_reconnect(self, tokens: List[str]) -> None:
         if not self._have_login():
@@ -767,20 +852,20 @@ class RaffitaInterpreter:
                 print(C_ERROR + f"  ✖  Reconnect to {host} failed: {exc}" + RESET)
 
     def cmd_disconnect(self, tokens: List[str]) -> None:
-        if tokens:
-            hosts = self._resolve_targets(tokens)
-            if not hosts:
-                print(C_WARN + "  ⚠  No hosts resolved." + RESET); return
-            for host in hosts:
-                sess = self.sessions.pop(host, None)
-                if sess:
-                    sess.disconnect()
-                    print(C_OK + f"  ✔  disconnected from {host}" + RESET)
-                else:
-                    print(C_WARN + f"  ⚠  No open session for {host}." + RESET)
-        else:
+        if not tokens or (len(tokens) == 1 and tokens[0].lower() in ("all", "--all")):
             self._close_all()
             print(C_OK + "  ✔  all sessions closed" + RESET)
+            return
+        hosts = self._resolve_targets(tokens)
+        if not hosts:
+            print(C_WARN + "  ⚠  No hosts resolved." + RESET); return
+        for host in hosts:
+            sess = self.sessions.pop(host, None)
+            if sess:
+                sess.disconnect()
+                print(C_OK + f"  ✔  disconnected from {host}" + RESET)
+            else:
+                print(C_WARN + f"  ⚠  No open session for {host}." + RESET)
 
     def cmd_targets(self) -> None:
         if not self.sessions:
@@ -1126,8 +1211,12 @@ class RaffitaInterpreter:
         print()
 
     def cmd_help(self, tokens: List[str]) -> None:
-        if tokens and tokens[0].lower() in OBJECTS:
+        if not tokens:
+            self._help_general()
+        elif tokens[0].lower() in OBJECTS:
             self._help_object(tokens[0].lower())
+        elif tokens[0].lower() in _VERB_HELP:
+            self._help_verb(tokens[0].lower())
         else:
             self._help_general()
 
@@ -1146,6 +1235,108 @@ class RaffitaInterpreter:
             print(f"  {CYAN_1}--{name:<20}{RESET}  {GRAY_9}{tname:<5}{RESET}  {req}{extra}{valmsg}")
             if cfg.get("help"):
                 print(f"        {C_DIM}{cfg['help']}{RESET}")
+        print()
+
+    def _help_verb(self, verb: str) -> None:
+        print()
+        print(C_INFO + f"  {verb}" + RESET)
+        print(GRAY_6 + "  " + "─" * 52 + RESET)
+        print(C_DIM + f"  Usage:  " + RESET + CYAN_1 + _VERB_HELP[verb] + RESET)
+
+        _VERB_NOTES: Dict[str, List[str]] = {
+            "show": [
+                "Runs the show commands for an object on the active target(s).",
+                "All parameters are optional — omitting them shows all instances.",
+                "Examples:  show vrf                  (all VRFs)",
+                "           show vrf --VRF_NAME PROD  (specific VRF)",
+                "           show anycast --VLAN_ID 100",
+                "           show mlt",
+            ],
+            "create": [
+                "Builds config from a template and pushes it (or previews in dry-run).",
+                "--live / --dry override the global mode for this one command.",
+                "Use 'help <obj>' to see parameters for a specific object.",
+            ],
+            "stage": [
+                "Builds config and writes it to staging/<host>.raffita.",
+                "Use 'deploy' to push staged files later.",
+            ],
+            "deploy": [
+                "Pushes .raffita files from staging/ (or named files).",
+                "The hostname is taken from the filename (sw-core-01.raffita → sw-core-01).",
+            ],
+            "command": [
+                "Sends exec-mode (non-config) commands to target(s).",
+                "Examples:  command --CMD \"show run\"",
+                "           command --CMD \"show virtual-ist\" --HOSTNAME sw-core-01",
+            ],
+            "connect": [
+                "Opens SSH connection(s) and sets those hosts as the active target.",
+                "With no arguments, connects to the current active target(s).",
+                "Examples:  connect sw-core-01",
+                "           connect @core",
+                "           connect @tag:access",
+            ],
+            "disconnect": [
+                "Closes SSH connection(s).",
+                "'disconnect all' or no arguments closes every open session.",
+                "Examples:  disconnect sw-core-01",
+                "           disconnect all",
+            ],
+            "reconnect": [
+                "Re-establishes dropped SSH connection(s).",
+                "Examples:  reconnect              (active target)",
+                "           reconnect --all        (all open sessions)",
+            ],
+            "rollback": [
+                "Undoes live 'create' pushes using per-host undo stacks.",
+                "Each stack holds up to 20 entries (session-scoped, not persisted).",
+                "Examples:  rollback              (undo last push on active target)",
+                "           rollback all          (undo all pushes on active target)",
+                "           rollback list         (show what's queued)",
+                "           rollback prestate     (show pre-push snapshot)",
+                "           rollback clear        (clear stack for active target)",
+                "           rollback clear --all  (clear all stacks)",
+            ],
+            "watch": [
+                "Repeats a command on a fixed interval.",
+                "Ctrl-C during a confirm prompt skips that iteration.",
+                "Ctrl-C during the sleep between iterations stops the watch.",
+                "Examples:  watch 30 show vrf",
+                "           watch 60 command --CMD \"show isis adjacency\"",
+            ],
+            "ping": [
+                "Checks TCP port 22 reachability — does not open a full SSH session.",
+                "Examples:  ping sw-core-01",
+                "           ping @core",
+                "           ping @tag:access",
+            ],
+            "set": [
+                "Sets a per-object parameter default so you don't repeat it every command.",
+                "Defaults have lower priority than explicit --PARAM values.",
+                "Examples:  set anycast VRF_NAME PROD",
+                "           set vrf ECMP_MAX_PATH 4",
+                "           set                       (list all defaults)",
+                "           set anycast               (list defaults for one object)",
+            ],
+        }
+
+        notes = _VERB_NOTES.get(verb, [])
+        if notes:
+            print()
+            for note in notes:
+                print(C_DIM + f"  {note}" + RESET)
+
+        if verb in OBJ_VERBS:
+            print()
+            print(GRAY_9 + "  Available objects:" + RESET)
+            for name in sorted(OBJECTS):
+                spec = OBJECTS[name]
+                note = C_DIM + "  (two nodes)" + RESET if spec.get("multi_host") else ""
+                print(f"  {CYAN_1}{name:<16}{RESET}  {GRAY_9}{spec.get('desc', '')}{RESET}{note}")
+            print()
+            print(C_DIM + "  Use 'help <obj>' to see parameters for a specific object." + RESET)
+
         print()
 
     def _help_general(self) -> None:
